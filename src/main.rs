@@ -1,10 +1,8 @@
-use std::{
-    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
-    str::FromStr,
-};
+use std::{collections::BTreeMap, str::FromStr};
 
 use anyhow::Result;
-use h3o::{CellIndex, LatLng};
+use clap::{Parser, Subcommand};
+use h3o::LatLng;
 use mac_address::MacAddress;
 use query::query;
 use rusqlite::Connection;
@@ -15,10 +13,44 @@ pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/apple.rs"));
 }
 
+#[derive(Parser)]
+struct Cli {
+    #[clap(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum Command {
+    Explore,
+    Query { mac: String },
+}
+
 fn main() -> Result<()> {
-    let mut conn = Connection::open("./wtfps.db")?;
+    let cli = Cli::parse();
+
+    let conn = Connection::open("./wtfps.db")?;
     conn.execute_batch(include_str!("../db.sql"))?;
 
+    match cli.command {
+        Command::Explore => explore(conn)?,
+        Command::Query { mac } => {
+            let wifis = query(mac)?;
+            let wifi = wifis.first();
+            if let Some(wifi) = wifi {
+                let loc = wifi.location.unwrap();
+                let (lat, lon) = (coord(loc.latitude.unwrap()), coord(loc.longitude.unwrap()));
+                println!(
+                    "https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=12/{lat}/{lon}"
+                )
+            }
+            dbg!(wifis.len());
+        }
+    }
+
+    Ok(())
+}
+
+fn explore(mut conn: Connection) -> Result<()> {
     let mut todo = BTreeMap::new();
     {
         let mut q = conn.prepare("select cell, mac from wifi_explore")?;
@@ -37,7 +69,7 @@ fn main() -> Result<()> {
         eprintln!("fetching {mac}");
         let wifis = query(mac.to_string())?;
         let mut new = 0;
-        let mut tx = conn.transaction()?;
+        let tx = conn.transaction()?;
         for wifi in wifis {
             let mut mac2 = String::new();
             for part in wifi.bssid.split(':') {

@@ -11,6 +11,7 @@ bytes = "1.6.1"
 reqwest = { version = "0.12.5", features = ["blocking", "gzip"] }
 h3o = "0.6.4"
 mac_address = "1.1.7"
+clap = { version = "4.5.9", features = ["derive"] }
 
 [build-dependencies]
 prost-build = "0.13.1"
