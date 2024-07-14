@@ -1,0 +1,16 @@
+[package]
+name = "wtfps"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+rusqlite = { version = "0.31.0", features = ["bundled"] }
+prost = "0.13.1"
+bytes = "1.6.1"
+reqwest = { version = "0.12.5", features = ["blocking", "gzip"] }
+h3o = "0.6.4"
+mac_address = "1.1.7"
+
+[build-dependencies]
+prost-build = "0.13.1"
