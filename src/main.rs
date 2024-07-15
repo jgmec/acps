@@ -157,7 +157,7 @@ async fn explore(pool: MySqlPool) -> Result<()> {
                 }
             }
         }
-        eprintln!("received {received}, {new} new");
+        eprintln!("received {received}, {new} new, {} cells todo", todo.len());
         tx.commit().await?;
     }
 
