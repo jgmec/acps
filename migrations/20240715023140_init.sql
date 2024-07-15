@@ -1,5 +1,5 @@
-create table if not exists wifi (
-    mac blob not null primary key,
+create table wifi (
+    mac binary(6) not null primary key,
     lat real not null,
     lon real not null,
     acc integer not null,
@@ -7,7 +7,7 @@ create table if not exists wifi (
     alt_acc integer not null
 );
 
-create table if not exists wifi_explore (
+create table wifi_explore (
     cell integer not null primary key,
-    mac blob not null
+    mac binary(6) not null
 );

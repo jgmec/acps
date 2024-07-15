@@ -1,0 +1,36 @@
+{
+  "db_name": "MySQL",
+  "query": "select cell, cast(mac as binary) as mac from wifi_explore",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cell",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL | PRIMARY_KEY | UNSIGNED | NO_DEFAULT_VALUE",
+          "char_set": 63,
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "mac",
+        "type_info": {
+          "type": "VarString",
+          "flags": "BINARY",
+          "char_set": 63,
+          "max_size": 6
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "3acc867c9973054d12f5ee0001e5cf6625ac498e174ec1f58b99d00946ce72a9"
+}

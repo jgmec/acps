@@ -4,10 +4,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use h3o::LatLng;
 use mac_address::MacAddress;
-use query::query;
-use rusqlite::Connection;
+use sqlx::{query, query_scalar, MySqlPool};
 
-mod query;
+mod fetch;
+use crate::fetch::fetch;
 
 pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/apple.rs"));
@@ -25,16 +25,15 @@ enum Command {
     Query { mac: String },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let conn = Connection::open("./wtfps.db")?;
-    conn.execute_batch(include_str!("../db.sql"))?;
-
+    let pool = MySqlPool::connect(&dotenvy::var("DATABASE_URL")?).await?;
     match cli.command {
-        Command::Explore => explore(conn)?,
+        Command::Explore => explore(pool).await?,
         Command::Query { mac } => {
-            let wifis = query(mac)?;
+            let wifis = fetch(mac).await?;
             let wifi = wifis.first();
             if let Some(wifi) = wifi {
                 let loc = wifi.location.unwrap();
@@ -50,26 +49,25 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn explore(mut conn: Connection) -> Result<()> {
+async fn explore(pool: MySqlPool) -> Result<()> {
     let mut todo = BTreeMap::new();
     {
-        let mut q = conn.prepare("select cell, mac from wifi_explore")?;
-        for row in q.query_map((), |x| {
-            let cell: u64 = x.get(0)?;
-            let mac: [u8; 6] = x.get(1)?;
-            let mac = MacAddress::new(mac);
-            Ok((cell, mac))
-        })? {
-            let (cell, mac) = row?;
+        // https://github.com/launchbadge/sqlx/issues/3199
+        let q = query!("select cell, cast(mac as binary) as mac from wifi_explore")
+            .fetch_all(&pool)
+            .await?;
+        for rec in q {
+            let cell = rec.cell;
+            let mac = MacAddress::new(rec.mac.unwrap().try_into().unwrap());
             todo.insert(cell, mac);
         }
     }
 
     while let Some((cell, mac)) = todo.pop_first() {
         eprintln!("fetching {mac}");
-        let wifis = query(mac.to_string())?;
+        let wifis = fetch(mac.to_string()).await?;
         let mut new = 0;
-        let tx = conn.transaction()?;
+        let mut tx = pool.begin().await?;
         for wifi in wifis {
             let mut mac2 = String::new();
             for part in wifi.bssid.split(':') {
@@ -82,46 +80,46 @@ fn explore(mut conn: Connection) -> Result<()> {
             mac2.pop();
 
             let mac = MacAddress::from_str(&mac2)?;
-            let known = tx.query_row(
-                "select count(*) from wifi where mac = ?",
-                (mac.bytes(),),
-                |x| {
-                    let count: usize = x.get(0)?;
-                    return Ok(count == 1);
-                },
-            )?;
+            let known = query_scalar!("select count(*) from wifi where mac = ?", &mac.bytes()[..])
+                .fetch_one(&mut *tx)
+                .await?;
 
-            if !known {
+            if known == 0 {
                 new += 1;
                 let loc = wifi.location.unwrap();
                 let (lat, lon) = (coord(loc.latitude.unwrap()), coord(loc.longitude.unwrap()));
-                tx.execute(
+                query!(
                     "insert into wifi (mac, lat, lon, acc, alt, alt_acc) values (?, ?, ?, ?, ?, ?)",
-                    (
-                        mac.bytes(),
-                        lat,
-                        lon,
-                        loc.horizontal_accuracy.unwrap(),
-                        loc.altitude.unwrap(),
-                        loc.vertical_accuracy.unwrap_or(0),
-                    ),
-                )?;
+                    &mac.bytes()[..],
+                    lat,
+                    lon,
+                    loc.horizontal_accuracy.unwrap(),
+                    loc.altitude.unwrap(),
+                    loc.vertical_accuracy.unwrap_or(0),
+                )
+                .execute(&mut *tx)
+                .await?;
 
                 let cell = LatLng::new(lat, lon)?.to_cell(h3o::Resolution::Ten);
                 let cell = u64::from(cell);
                 if !todo.contains_key(&cell) {
                     todo.insert(cell, mac);
-                    tx.execute(
-                        "insert into wifi_explore (cell, mac) values (?, ?) on conflict do nothing",
-                        (cell, mac.bytes()),
-                    )?;
+                    query!(
+                        "insert ignore into wifi_explore (cell, mac) values (?, ?)",
+                        cell,
+                        &mac.bytes()[..],
+                    )
+                    .execute(&mut *tx)
+                    .await?;
                 }
             }
         }
 
         eprintln!("found {new}");
-        tx.execute("delete from wifi_explore where cell = ?", (cell,))?;
-        tx.commit()?;
+        query!("delete from wifi_explore where cell = ?", cell)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
     }
 
     Ok(())

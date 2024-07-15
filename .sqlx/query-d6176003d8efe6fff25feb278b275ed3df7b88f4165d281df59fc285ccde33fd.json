@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "delete from wifi_explore where cell = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "d6176003d8efe6fff25feb278b275ed3df7b88f4165d281df59fc285ccde33fd"
+}

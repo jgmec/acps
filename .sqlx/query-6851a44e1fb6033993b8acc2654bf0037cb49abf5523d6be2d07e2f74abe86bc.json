@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "insert into wifi (mac, lat, lon, acc, alt, alt_acc) values (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "6851a44e1fb6033993b8acc2654bf0037cb49abf5523d6be2d07e2f74abe86bc"
+}
