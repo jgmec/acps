@@ -91,7 +91,7 @@ async fn explore(pool: MySqlPool) -> Result<()> {
         while let Some((cell, mac)) = todo.pop_first() {
             in_flight.spawn(tokio::spawn(fetch(mac.to_string())));
             cells_requested.push(cell);
-            if in_flight.len() == 8 {
+            if in_flight.len() == 16 {
                 break;
             }
         }
