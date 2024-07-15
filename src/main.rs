@@ -128,7 +128,9 @@ async fn explore(pool: MySqlPool) -> Result<()> {
             }
         }
 
-        eprintln!("found {new}");
+        let loc = LatLng::from(CellIndex::try_from(cell)?);
+        let (lat, lon) = (loc.lat(), loc.lng());
+        println!("{{\"count\":{new},\"latitude\":{lat},\"longitude\":{lon}}}");
         query!("delete from wifi_explore where cell = ?", cell)
             .execute(&mut *tx)
             .await?;
