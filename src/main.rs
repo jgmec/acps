@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, str::FromStr};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use h3o::LatLng;
+use h3o::{CellIndex, LatLng};
 use mac_address::MacAddress;
 use sqlx::{query, query_scalar, MySqlPool};
 
@@ -22,6 +22,7 @@ struct Cli {
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
     Explore,
+    ExploreQueue,
     Query { mac: String },
 }
 
@@ -32,6 +33,18 @@ async fn main() -> Result<()> {
     let pool = MySqlPool::connect(&dotenvy::var("DATABASE_URL")?).await?;
     match cli.command {
         Command::Explore => explore(pool).await?,
+        Command::ExploreQueue => {
+            let cells = query_scalar!("select cell from wifi_explore")
+                .fetch_all(&pool)
+                .await?;
+            println!("lat,lon");
+            for cell in cells {
+                let cell = CellIndex::try_from(cell)?;
+                let loc = LatLng::from(cell);
+                let (lat, lon) = (loc.lat(), loc.lng());
+                println!("{lat},{lon}");
+            }
+        }
         Command::Query { mac } => {
             let wifis = fetch(mac).await?;
             let wifi = wifis.first();
