@@ -1,10 +1,14 @@
-use std::{collections::BTreeMap, str::FromStr};
+use std::{
+    collections::{BTreeMap, HashMap},
+    str::FromStr,
+};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use h3o::{CellIndex, LatLng};
 use mac_address::MacAddress;
 use sqlx::{query, query_scalar, MySqlPool};
+use tokio::task::JoinSet;
 
 mod fetch;
 use crate::fetch::fetch;
@@ -76,31 +80,57 @@ async fn explore(pool: MySqlPool) -> Result<()> {
         }
     }
 
-    while let Some((cell, mac)) = todo.pop_first() {
-        eprintln!("fetching {mac}");
-        let wifis = fetch(mac.to_string()).await?;
-        let mut new = 0;
-        let mut tx = pool.begin().await?;
-        for wifi in wifis {
-            let mut mac2 = String::new();
-            for part in wifi.bssid.split(':') {
-                if part.len() == 1 {
-                    mac2.push('0');
-                }
-                mac2.push_str(&part);
-                mac2.push(':');
-            }
-            mac2.pop();
+    loop {
+        if todo.is_empty() {
+            break;
+        }
 
-            let mac = MacAddress::from_str(&mac2)?;
+        // start requests
+        let mut in_flight = JoinSet::new();
+        let mut cells_requested = Vec::new();
+        while let Some((cell, mac)) = todo.pop_first() {
+            in_flight.spawn(tokio::spawn(fetch(mac.to_string())));
+            cells_requested.push(cell);
+            if in_flight.len() == 8 {
+                break;
+            }
+        }
+
+        // collect responses
+        let mut wifis = HashMap::new();
+        while let Some(response) = in_flight.join_next().await {
+            for wifi in response??? {
+                let mut mac = String::new();
+                for part in wifi.bssid.split(':') {
+                    if part.len() == 1 {
+                        mac.push('0');
+                    }
+                    mac.push_str(&part);
+                    mac.push(':');
+                }
+                mac.pop();
+                let mac = MacAddress::from_str(&mac)?;
+                wifis.insert(mac, wifi.location.unwrap());
+            }
+        }
+
+        // write to db
+        let mut tx = pool.begin().await?;
+        for cell in cells_requested {
+            query!("delete from wifi_explore where cell = ?", cell)
+                .execute(&mut *tx)
+                .await?;
+        }
+        let received = wifis.len();
+        let mut new = 0;
+        for (mac, loc) in wifis {
             let known = query_scalar!("select count(*) from wifi where mac = ?", &mac.bytes()[..])
                 .fetch_one(&mut *tx)
                 .await?;
-
             if known == 0 {
                 new += 1;
-                let loc = wifi.location.unwrap();
                 let (lat, lon) = (coord(loc.latitude.unwrap()), coord(loc.longitude.unwrap()));
+                println!("{{\"latitude\":{lat},\"longitude\":{lon}}}");
                 query!(
                     "insert into wifi (mac, lat, lon, acc, alt, alt_acc) values (?, ?, ?, ?, ?, ?)",
                     &mac.bytes()[..],
@@ -127,13 +157,7 @@ async fn explore(pool: MySqlPool) -> Result<()> {
                 }
             }
         }
-
-        let loc = LatLng::from(CellIndex::try_from(cell)?);
-        let (lat, lon) = (loc.lat(), loc.lng());
-        println!("{{\"count\":{new},\"latitude\":{lat},\"longitude\":{lon}}}");
-        query!("delete from wifi_explore where cell = ?", cell)
-            .execute(&mut *tx)
-            .await?;
+        eprintln!("received {received}, {new} new");
         tx.commit().await?;
     }
 
