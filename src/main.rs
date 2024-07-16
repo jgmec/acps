@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use futures::{stream, StreamExt, TryStreamExt};
 use h3o::{CellIndex, LatLng};
 use mac_address::MacAddress;
 use reqwest::Client;
@@ -88,20 +89,22 @@ async fn explore(pool: MySqlPool) -> Result<()> {
         }
 
         // start requests
-        let mut in_flight = JoinSet::new();
+        let mut requests = Vec::new();
         let mut cells_requested = Vec::new();
         while let Some((cell, mac)) = todo.pop_first() {
-            in_flight.spawn(tokio::spawn(fetch(client.clone(), mac.to_string())));
+            requests.push(fetch(client.clone(), mac.to_string()));
             cells_requested.push(cell);
-            if in_flight.len() == 64 {
+            if requests.len() == 1024 {
                 break;
             }
         }
 
         // collect responses
+        let mut requests = stream::iter(requests).buffer_unordered(64);
         let mut wifis = HashMap::new();
-        while let Some(response) = in_flight.join_next().await {
-            for wifi in response??? {
+        while let Some(response) = requests.try_next().await? {
+            // println!("{}", response.len());
+            for wifi in response {
                 let mut mac = String::new();
                 for part in wifi.bssid.split(':') {
                     if part.len() == 1 {
@@ -117,6 +120,7 @@ async fn explore(pool: MySqlPool) -> Result<()> {
         }
 
         // write to db
+        eprintln!("db");
         let mut tx = pool.begin().await?;
         for cell in cells_requested {
             query!("delete from wifi_explore where cell = ?", cell)
