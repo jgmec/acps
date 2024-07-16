@@ -7,6 +7,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use h3o::{CellIndex, LatLng};
 use mac_address::MacAddress;
+use reqwest::Client;
 use sqlx::{query, query_scalar, MySqlPool};
 use tokio::task::JoinSet;
 
@@ -50,7 +51,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Query { mac } => {
-            let wifis = fetch(mac).await?;
+            let wifis = fetch(Client::new(), mac).await?;
             let wifi = wifis.first();
             if let Some(wifi) = wifi {
                 let loc = wifi.location.unwrap();
@@ -80,6 +81,7 @@ async fn explore(pool: MySqlPool) -> Result<()> {
         }
     }
 
+    let client = Client::new();
     loop {
         if todo.is_empty() {
             break;
@@ -89,9 +91,9 @@ async fn explore(pool: MySqlPool) -> Result<()> {
         let mut in_flight = JoinSet::new();
         let mut cells_requested = Vec::new();
         while let Some((cell, mac)) = todo.pop_first() {
-            in_flight.spawn(tokio::spawn(fetch(mac.to_string())));
+            in_flight.spawn(tokio::spawn(fetch(client.clone(), mac.to_string())));
             cells_requested.push(cell);
-            if in_flight.len() == 16 {
+            if in_flight.len() == 64 {
                 break;
             }
         }

@@ -1,9 +1,10 @@
 use anyhow::Result;
 use prost::Message;
+use reqwest::Client;
 
 use crate::protobuf::{AppleWLoc, WifiDevice};
 
-pub async fn fetch(bssid: String) -> Result<Vec<WifiDevice>> {
+pub async fn fetch(client: Client, bssid: String) -> Result<Vec<WifiDevice>> {
     let x = AppleWLoc {
         wifi_devices: vec![WifiDevice {
             bssid,
@@ -27,7 +28,6 @@ pub async fn fetch(bssid: String) -> Result<Vec<WifiDevice>> {
     x.encode_length_delimited(&mut payload)?;
     x.encode(&mut payload)?;
 
-    let client = reqwest::Client::new();
     let resp = client
         .post("https://gs-loc.apple.com/clls/wloc")
         .header("content-type", "application/x-www-form-urlencoded")
