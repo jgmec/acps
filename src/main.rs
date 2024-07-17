@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     str::FromStr,
 };
 
@@ -10,7 +10,6 @@ use h3o::{CellIndex, LatLng};
 use mac_address::MacAddress;
 use reqwest::Client;
 use sqlx::{query, query_scalar, MySqlPool};
-use tokio::task::JoinSet;
 
 mod fetch;
 use crate::fetch::fetch;
@@ -69,6 +68,7 @@ async fn main() -> Result<()> {
 }
 
 async fn explore(pool: MySqlPool) -> Result<()> {
+    let mut known_cache = BTreeSet::new();
     let mut todo = BTreeMap::new();
     {
         // https://github.com/launchbadge/sqlx/issues/3199
@@ -130,10 +130,17 @@ async fn explore(pool: MySqlPool) -> Result<()> {
         let received = wifis.len();
         let mut new = 0;
         for (mac, loc) in wifis {
-            let known = query_scalar!("select count(*) from wifi where mac = ?", &mac.bytes()[..])
-                .fetch_one(&mut *tx)
-                .await?;
-            if known == 0 {
+            let known = if known_cache.contains(&mac) {
+                true
+            } else {
+                known_cache.insert(mac);
+                query_scalar!("select count(*) from wifi where mac = ?", &mac.bytes()[..])
+                    .fetch_one(&mut *tx)
+                    .await?
+                    > 0
+            };
+
+            if !known {
                 new += 1;
                 let (lat, lon) = (coord(loc.latitude.unwrap()), coord(loc.longitude.unwrap()));
                 println!("{{\"latitude\":{lat},\"longitude\":{lon}}}");
@@ -163,7 +170,11 @@ async fn explore(pool: MySqlPool) -> Result<()> {
                 }
             }
         }
-        eprintln!("received {received}, {new} new, {} cells todo", todo.len());
+        eprintln!(
+            "received {received}, {new} new, {} known cached, {} cells todo",
+            known_cache.len(),
+            todo.len()
+        );
         tx.commit().await?;
     }
 
