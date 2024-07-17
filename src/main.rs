@@ -6,7 +6,7 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::{stream, StreamExt, TryStreamExt};
-use h3o::{CellIndex, LatLng};
+use h3o::{CellIndex, LatLng, Resolution};
 use mac_address::MacAddress;
 use reqwest::Client;
 use sqlx::{query, query_scalar, MySqlPool};
@@ -26,6 +26,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
+    Coverage,
     Explore,
     ExploreQueue,
     Query { mac: String },
@@ -37,6 +38,25 @@ async fn main() -> Result<()> {
 
     let pool = MySqlPool::connect(&dotenvy::var("DATABASE_URL")?).await?;
     match cli.command {
+        Command::Coverage => {
+            let mut cells = BTreeSet::new();
+            query!("select lat, lon from wifi")
+                .fetch(&pool)
+                .try_for_each(|x| {
+                    let loc = LatLng::new(x.lat, x.lon).unwrap();
+                    let cell = loc.to_cell(Resolution::Ten);
+                    cells.insert(cell);
+
+                    async { Ok(()) } // :)
+                })
+                .await?;
+
+            println!("lat,lon");
+            for cell in cells {
+                let loc = LatLng::from(cell);
+                println!("{},{}", loc.lat(), loc.lng());
+            }
+        }
         Command::Explore => explore(pool).await?,
         Command::ExploreQueue => {
             let cells = query_scalar!("select cell from wifi_explore")
