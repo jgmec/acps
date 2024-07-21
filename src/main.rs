@@ -95,18 +95,21 @@ async fn main() -> Result<()> {
         //     }
         // }
         Command::Explore => explore(conn).await?,
-        // Command::ExploreQueue => {
-        //     let cells = query_scalar!("select cell from wifi_explore")
-        //         .fetch_all(&pool)
-        //         .await?;
-        //     println!("lat,lon");
-        //     for cell in cells {
-        //         let cell = CellIndex::try_from(cell)?;
-        //         let loc = LatLng::from(cell);
-        //         let (lat, lon) = (loc.lat(), loc.lng());
-        //         println!("{lat},{lon}");
-        //     }
-        // }
+        Command::ExploreQueue => {
+            println!("lat,lon");
+            for cell in conn
+                .prepare("select cell from wifi_explore")?
+                .query_map((), |row| {
+                    let cell: u64 = row.get(0)?;
+                    Ok(cell)
+                })?
+            {
+                let cell = CellIndex::try_from(cell?)?;
+                let loc = LatLng::from(cell);
+                let (lat, lon) = (loc.lat(), loc.lng());
+                println!("{lat},{lon}");
+            }
+        }
         Command::Query { mac } => {
             let wifis = fetch(Client::new(), mac).await?;
             if let Some((_, loc)) = wifis.first() {
