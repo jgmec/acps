@@ -153,17 +153,19 @@ fn commit(
             let existing = if cache.contains(&mac) {
                 true
             } else {
-                tx.query_row("select count(*) from wifi where mac = ?", (macn,), |row| {
-                    let x: usize = row.get(0)?;
-                    Ok(x == 1)
-                })?
+                tx.prepare_cached("select count(*) from wifi where mac = ?")?
+                    .query_row((macn,), |row| {
+                        let x: usize = row.get(0)?;
+                        Ok(x == 1)
+                    })?
             };
             to_cache.insert(mac);
 
             if !existing {
                 let celln = loc.celln();
-                tx.execute(
-                    "insert into wifi (mac, cell, lat, lon) values (?, ?, ?, ?) on conflict do nothing",
+                tx.prepare_cached(
+                    "insert into wifi (mac, cell, lat, lon) values (?, ?, ?, ?) on conflict do nothing"
+                )?.execute(
                     (macn, celln, loc.lat, loc.lon),
                 )?;
 
@@ -172,22 +174,21 @@ fn commit(
             }
         } else {
             failed += 1;
-            tx.execute("insert into wifi_fail (mac) values (?)", (macn,))?;
+            tx.prepare_cached("insert into wifi_fail (mac) values (?)")?
+                .execute((macn,))?;
         }
 
-        tx.execute("delete from wifi_explore where mac = ?", (macn,))?;
-        tx.execute("delete from wifi_brute where mac = ?", (macn,))?;
+        tx.prepare_cached("delete from wifi_explore where mac = ?")?
+            .execute((macn,))?;
+        tx.prepare_cached("delete from wifi_brute where mac = ?")?
+            .execute((macn,))?;
     }
-    eprintln!(
-        "{total_macs} total, {new_macs} new, {failed} failed, {} cached",
-        cache.len()
-    );
 
     for (celln, macn) in to_explore {
-        tx.execute(
+        tx.prepare_cached(
             "insert into wifi_explore (cell, mac) values (?, ?) on conflict do nothing",
-            (celln, macn),
-        )?;
+        )?
+        .execute((celln, macn))?;
         let loc = LatLng::from(CellIndex::try_from(celln)?);
         println!("{{\"latitude\":{},\"longitude\":{}}}", loc.lat(), loc.lng());
     }
@@ -201,6 +202,10 @@ fn commit(
 
     tx.commit()?;
 
+    eprintln!(
+        "{total_macs} total, {new_macs} new, {failed} failed, {} cached",
+        cache.len()
+    );
     Ok(())
 }
 
