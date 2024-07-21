@@ -162,7 +162,6 @@ fn commit(
 
             if !existing {
                 let celln = loc.celln();
-                println!("{{\"latitude\":{},\"longitude\":{}}}", loc.lat, loc.lon);
                 tx.execute(
                     "insert into wifi (mac, cell, lat, lon) values (?, ?, ?, ?) on conflict do nothing",
                     (macn, celln, loc.lat, loc.lon),
@@ -189,6 +188,8 @@ fn commit(
             "insert into wifi_explore (cell, mac) values (?, ?) on conflict do nothing",
             (celln, macn),
         )?;
+        let loc = LatLng::from(CellIndex::try_from(celln)?);
+        println!("{{\"latitude\":{},\"longitude\":{}}}", loc.lat(), loc.lng());
     }
 
     // approx 1GB of RAM
