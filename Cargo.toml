@@ -17,6 +17,7 @@ futures = "0.3.30"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 
 macn = { path = "../macn" }
+tryhard = "0.5.1"
 
 [build-dependencies]
 prost-build = "0.13.1"

@@ -3,6 +3,7 @@ use h3o::{CellIndex, LatLng, Resolution};
 use macn::Mac;
 use prost::Message;
 use reqwest::Client;
+use tryhard::retry_fn;
 
 use crate::protobuf::{AppleWLoc, WifiDevice};
 
@@ -67,20 +68,24 @@ pub async fn fetch(client: Client, bssid: String) -> Result<Vec<(Mac, Option<Loc
     x.encode_length_delimited(&mut payload)?;
     x.encode(&mut payload)?;
 
-    let resp = client
-        .post("https://gs-loc.apple.com/clls/wloc")
-        .header("content-type", "application/x-www-form-urlencoded")
-        .header("accept", "*/*")
-        .header("accept-charset", "utf-8")
-        .header("accept-language", "en-us")
-        .header(
-            "user-agent",
-            "locationd/1753.17 CFNetwork/711.1.12 Darwin/14.0.0",
-        )
-        .body(payload)
-        .send()
-        .await?
-        .error_for_status()?;
+    let resp = retry_fn(|| {
+        let payload = payload.clone();
+        let req = client
+            .post("https://gs-loc.apple.com/clls/wloc")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("accept", "*/*")
+            .header("accept-charset", "utf-8")
+            .header("accept-language", "en-us")
+            .header(
+                "user-agent",
+                "locationd/1753.17 CFNetwork/711.1.12 Darwin/14.0.0",
+            )
+            .body(payload);
+
+        async { anyhow::Ok(req.send().await?.error_for_status()?) }
+    })
+    .retries(5)
+    .await?;
 
     let x = AppleWLoc::decode(&resp.bytes().await?[10..])?;
     let mut output = Vec::new();
