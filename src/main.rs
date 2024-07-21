@@ -145,6 +145,7 @@ fn commit(
     let mut new_macs = 0;
     let mut failed = 0;
     let mut to_explore = BTreeMap::new();
+    let mut to_cache = BTreeSet::new();
     for (mac, loc) in locs {
         let macn = u64::from(mac);
 
@@ -157,7 +158,7 @@ fn commit(
                     Ok(x == 1)
                 })?
             };
-            cache.insert(mac);
+            to_cache.insert(mac);
 
             if !existing {
                 let celln = loc.celln();
@@ -188,6 +189,13 @@ fn commit(
             "insert into wifi_explore (cell, mac) values (?, ?) on conflict do nothing",
             (celln, macn),
         )?;
+    }
+
+    // approx 1GB of RAM
+    if cache.len() > 32_000_000 {
+        *cache = to_cache;
+    } else {
+        cache.extend(to_cache);
     }
 
     tx.commit()?;
