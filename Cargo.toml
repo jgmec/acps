@@ -12,9 +12,11 @@ h3o = "0.6.4"
 mac_address = "1.1.7"
 clap = { version = "4.5.9", features = ["derive"] }
 tokio = { version = "1.38.0", features = ["full"] }
-sqlx = { version = "0.7.4", features = ["mysql", "runtime-tokio", "macros"] }
 dotenvy = "0.15.7"
 futures = "0.3.30"
+rusqlite = { version = "0.31.0", features = ["bundled"] }
+
+macn = { path = "../macn" }
 
 [build-dependencies]
 prost-build = "0.13.1"

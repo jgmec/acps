@@ -1,10 +1,49 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
+use h3o::{CellIndex, LatLng, Resolution};
+use macn::Mac;
 use prost::Message;
 use reqwest::Client;
 
 use crate::protobuf::{AppleWLoc, WifiDevice};
 
-pub async fn fetch(client: Client, bssid: String) -> Result<Vec<WifiDevice>> {
+pub struct Location {
+    pub lat: f64,
+    pub lon: f64,
+}
+
+impl Location {
+    pub fn cell(&self) -> CellIndex {
+        let loc = LatLng::new(self.lat, self.lon).expect("invalid location");
+        loc.to_cell(Resolution::Ten)
+    }
+
+    pub fn celln(&self) -> u64 {
+        self.cell().into()
+    }
+}
+
+impl Location {
+    fn from_raw(value: crate::protobuf::Location) -> Option<Self> {
+        let (lat, lon) = (value.latitude, value.longitude);
+        let (lat, lon) = (coord(lat), coord(lon));
+        if let Some(lat) = lat {
+            if let Some(lon) = lon {
+                return Some(Location { lat, lon });
+            }
+        }
+
+        return None;
+    }
+}
+
+fn coord(coord: Option<i64>) -> Option<f64> {
+    match coord {
+        None | Some(-180) => None,
+        Some(x) => Some(x as f64 * 1e-8),
+    }
+}
+
+pub async fn fetch(client: Client, bssid: String) -> Result<Vec<(Mac, Option<Location>)>> {
     let x = AppleWLoc {
         wifi_devices: vec![WifiDevice {
             bssid,
@@ -44,5 +83,17 @@ pub async fn fetch(client: Client, bssid: String) -> Result<Vec<WifiDevice>> {
         .error_for_status()?;
 
     let x = AppleWLoc::decode(&resp.bytes().await?[10..])?;
-    Ok(x.wifi_devices)
+    let mut output = Vec::new();
+    for x in x.wifi_devices {
+        let mac: Mac = match x.bssid.parse() {
+            Ok(x) => x,
+            Err(_) => bail!("Failed to parse mac: {}", x.bssid),
+        };
+        let loc = Location::from_raw(
+            x.location
+                .expect("response uses (-180, -180) to represent not found"),
+        );
+        output.push((mac, loc));
+    }
+    Ok(output)
 }

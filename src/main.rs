@@ -8,11 +8,12 @@ use clap::{Parser, Subcommand};
 use futures::{stream, StreamExt, TryStreamExt};
 use h3o::{CellIndex, LatLng, Resolution};
 use mac_address::MacAddress;
+use macn::Mac;
 use reqwest::Client;
-use sqlx::{query, query_scalar, MySqlPool};
+use rusqlite::Connection;
 
 mod fetch;
-use crate::fetch::fetch;
+use crate::fetch::{fetch, Location};
 
 pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/apple.rs"));
@@ -37,196 +38,176 @@ enum Command {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let pool = MySqlPool::connect(&dotenvy::var("DATABASE_URL")?).await?;
+    let mut conn = Connection::open("wtfps.db")?;
+    conn.execute_batch(&include_str!("../db.sql"))?;
+
     match cli.command {
-        Command::Brute { base } => {
-            let mut tx = pool.begin().await?;
-            for e in 0..=255u8 {
-                for f in 0..=255u8 {
-                    let mac = format!("{base}:{f:02x}:{e:02x}");
-                    let mac = MacAddress::from_str(&mac)?;
-                    query!(
-                    "insert ignore into wifi_explore (cell, mac) values (FLOOR((RAND() * 10000000000000)), ?)",
-                    &mac.bytes()[..]
-                )
-                    .execute(&mut *tx)
-                    .await?;
-                }
-            }
-            tx.commit().await?;
-        }
-        Command::Coverage => {
-            let mut cells = BTreeMap::new();
-            query!("select lat, lon from wifi")
-                .fetch(&pool)
-                .try_for_each(|x| {
-                    let loc = LatLng::new(x.lat, x.lon).unwrap();
-                    let cell = loc.to_cell(Resolution::Ten);
-                    if let Some(x) = cells.get_mut(&cell) {
-                        *x += 1;
-                    } else {
-                        cells.insert(cell, 1usize);
-                    }
+        // Command::Brute { base } => {
+        //     let mut tx = pool.begin().await?;
+        //     for e in 0..=255u8 {
+        //         for f in 0..=255u8 {
+        //             let mac = format!("{base}:{f:02x}:{e:02x}");
+        //             let mac = MacAddress::from_str(&mac)?;
+        //             query!(
+        //             "insert ignore into wifi_explore (cell, mac) values (FLOOR((RAND() * 10000000000000)), ?)",
+        //             &mac.bytes()[..]
+        //         )
+        //             .execute(&mut *tx)
+        //             .await?;
+        //         }
+        //     }
+        //     tx.commit().await?;
+        // }
+        // Command::Coverage => {
+        //     let mut cells = BTreeMap::new();
+        //     query!("select lat, lon from wifi")
+        //         .fetch(&pool)
+        //         .try_for_each(|x| {
+        //             let loc = LatLng::new(x.lat, x.lon).unwrap();
+        //             let cell = loc.to_cell(Resolution::Ten);
+        //             if let Some(x) = cells.get_mut(&cell) {
+        //                 *x += 1;
+        //             } else {
+        //                 cells.insert(cell, 1usize);
+        //             }
 
-                    async { Ok(()) } // :)
-                })
-                .await?;
+        //             async { Ok(()) } // :)
+        //         })
+        //         .await?;
 
-            println!("lat,lon,count");
-            for (cell, count) in cells {
-                let loc = LatLng::from(cell);
-                println!("{},{},{count}", loc.lat(), loc.lng());
-            }
-        }
-        Command::Explore => explore(pool).await?,
-        Command::ExploreQueue => {
-            let cells = query_scalar!("select cell from wifi_explore")
-                .fetch_all(&pool)
-                .await?;
-            println!("lat,lon");
-            for cell in cells {
-                let cell = CellIndex::try_from(cell)?;
-                let loc = LatLng::from(cell);
-                let (lat, lon) = (loc.lat(), loc.lng());
-                println!("{lat},{lon}");
-            }
-        }
+        //     println!("lat,lon,count");
+        //     for (cell, count) in cells {
+        //         let loc = LatLng::from(cell);
+        //         println!("{},{},{count}", loc.lat(), loc.lng());
+        //     }
+        // }
+        Command::Explore => explore(conn).await?,
+        // Command::ExploreQueue => {
+        //     let cells = query_scalar!("select cell from wifi_explore")
+        //         .fetch_all(&pool)
+        //         .await?;
+        //     println!("lat,lon");
+        //     for cell in cells {
+        //         let cell = CellIndex::try_from(cell)?;
+        //         let loc = LatLng::from(cell);
+        //         let (lat, lon) = (loc.lat(), loc.lng());
+        //         println!("{lat},{lon}");
+        //     }
+        // }
         Command::Query { mac } => {
             let wifis = fetch(Client::new(), mac).await?;
-            let wifi = wifis.first();
-            if let Some(wifi) = wifi {
-                let loc = wifi.location.unwrap();
-                let (lat, lon) = (coord(loc.latitude.unwrap()), coord(loc.longitude.unwrap()));
-                println!(
-                    "https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=12/{lat}/{lon}"
-                )
+            if let Some((_, loc)) = wifis.first() {
+                if let Some(Location { lat, lon }) = loc {
+                    println!(
+                        "https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=12/{lat}/{lon}"
+                    )
+                }
             }
+
             dbg!(wifis.len());
+            let mut locs = BTreeMap::new();
+            for (mac, loc) in wifis {
+                if let Some(loc) = loc {
+                    locs.insert(mac, loc);
+                }
+            }
+            commit(&mut conn, &mut BTreeSet::new(), locs)?;
         }
+        _ => todo!(),
     }
 
     Ok(())
 }
 
-async fn explore(pool: MySqlPool) -> Result<()> {
-    let mut known_cache = BTreeSet::new();
-    let mut todo = BTreeMap::new();
-    {
-        // https://github.com/launchbadge/sqlx/issues/3199
-        let q = query!("select cell, cast(mac as binary) as mac from wifi_explore")
-            .fetch_all(&pool)
-            .await?;
-        for rec in q {
-            let cell = rec.cell;
-            let mac = MacAddress::new(rec.mac.unwrap().try_into().unwrap());
-            todo.insert(cell, mac);
+fn commit(
+    conn: &mut Connection,
+    cache: &mut BTreeSet<Mac>,
+    locs: BTreeMap<Mac, Location>,
+) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let total_macs = locs.len();
+    let mut new_macs = 0;
+    let mut to_explore = BTreeMap::new();
+    for (mac, loc) in locs {
+        let celln = loc.celln();
+        let macn = u64::from(mac);
+
+        let existing = if cache.contains(&mac) {
+            true
+        } else {
+            tx.query_row("select count(*) from wifi where mac = ?", (macn,), |row| {
+                let x: usize = row.get(0)?;
+                Ok(x == 1)
+            })?
+        };
+        cache.insert(mac);
+
+        if existing {
+            tx.execute("delete from wifi_explore where mac = ?", (macn,))?;
+        } else {
+            println!("{{\"latitude\":{},\"longitude\":{}}}", loc.lat, loc.lon);
+            tx.execute(
+                "insert into wifi (mac, cell, lat, lon) values (?, ?, ?, ?) on conflict do nothing",
+                (macn, celln, loc.lat, loc.lon),
+            )?;
+
+            new_macs += 1;
+            to_explore.insert(celln, macn);
         }
     }
+    eprintln!("{total_macs} total, {new_macs} new, {} cached", cache.len());
 
+    for (celln, macn) in to_explore {
+        tx.execute(
+            "insert into wifi_explore (cell, mac) values (?, ?) on conflict do nothing",
+            (celln, macn),
+        )?;
+    }
+
+    tx.commit()?;
+
+    Ok(())
+}
+
+async fn explore(mut conn: Connection) -> Result<()> {
     let client = Client::new();
+    let mut cache = BTreeSet::new();
+
     loop {
+        let mut todo = Vec::new();
+        for mac in conn
+            .prepare("select mac from wifi_explore")?
+            .query_map((), |row| {
+                let mac: u64 = row.get(0)?;
+                Ok(Mac::from(mac))
+            })?
+        {
+            todo.push(mac?);
+        }
+
         if todo.is_empty() {
             break;
         }
 
         // start requests
         let mut requests = Vec::new();
-        let mut cells_requested = Vec::new();
-        while let Some((cell, mac)) = todo.pop_first() {
+        while let Some(mac) = todo.pop() {
             requests.push(fetch(client.clone(), mac.to_string()));
-            cells_requested.push(cell);
-            if requests.len() == 1024 {
-                break;
-            }
         }
-
-        // collect responses
+        eprintln!("-> {} requests", requests.len());
         let mut requests = stream::iter(requests).buffer_unordered(64);
-        let mut wifis = HashMap::new();
+        let mut locs = BTreeMap::new();
         while let Some(response) = requests.try_next().await? {
-            // println!("{}", response.len());
-            for wifi in response {
-                let mut mac = String::new();
-                for part in wifi.bssid.split(':') {
-                    if part.len() == 1 {
-                        mac.push('0');
-                    }
-                    mac.push_str(&part);
-                    mac.push(':');
-                }
-                mac.pop();
-                let mac = MacAddress::from_str(&mac)?;
-                wifis.insert(mac, wifi.location.unwrap());
-            }
-        }
-
-        // write to db
-        eprintln!("db");
-        let mut tx = pool.begin().await?;
-        for cell in cells_requested {
-            query!("delete from wifi_explore where cell = ?", cell)
-                .execute(&mut *tx)
-                .await?;
-        }
-        let received = wifis.len();
-        let mut new = 0;
-        for (mac, loc) in wifis {
-            let (lat, lon) = (coord(loc.latitude.unwrap()), coord(loc.longitude.unwrap()));
-            if lat == -180.0 && lon == -180.0 {
-                continue;
-            }
-
-            let known = if known_cache.contains(&mac) {
-                true
-            } else {
-                known_cache.insert(mac);
-                query_scalar!("select count(*) from wifi where mac = ?", &mac.bytes()[..])
-                    .fetch_one(&mut *tx)
-                    .await?
-                    > 0
-            };
-
-            if !known {
-                new += 1;
-                println!("{{\"latitude\":{lat},\"longitude\":{lon}}}");
-                query!(
-                    "insert into wifi (mac, lat, lon, acc, alt, alt_acc) values (?, ?, ?, ?, ?, ?)",
-                    &mac.bytes()[..],
-                    lat,
-                    lon,
-                    loc.horizontal_accuracy.unwrap(),
-                    loc.altitude.unwrap(),
-                    loc.vertical_accuracy.unwrap_or(0),
-                )
-                .execute(&mut *tx)
-                .await?;
-
-                let cell = LatLng::new(lat, lon)?.to_cell(h3o::Resolution::Ten);
-                let cell = u64::from(cell);
-                if !todo.contains_key(&cell) {
-                    todo.insert(cell, mac);
-                    query!(
-                        "insert ignore into wifi_explore (cell, mac) values (?, ?)",
-                        cell,
-                        &mac.bytes()[..],
-                    )
-                    .execute(&mut *tx)
-                    .await?;
+            for (mac, loc) in response {
+                if let Some(loc) = loc {
+                    locs.insert(mac, loc);
                 }
             }
         }
-        eprintln!(
-            "received {received}, {new} new, {} known cached, {} cells todo",
-            known_cache.len(),
-            todo.len()
-        );
-        tx.commit().await?;
+        eprintln!("<-");
+        commit(&mut conn, &mut cache, locs)?;
     }
 
     Ok(())
-}
-
-#[inline(always)]
-pub fn coord(coord: i64) -> f64 {
-    coord as f64 * 1e-8
 }
