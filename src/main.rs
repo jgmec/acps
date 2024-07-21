@@ -39,6 +39,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let mut conn = Connection::open("wtfps.db")?;
+    conn.pragma_update(None, "journal_mode", "wal")?;
     conn.execute_batch(&include_str!("../db.sql"))?;
 
     match cli.command {
@@ -201,7 +202,7 @@ async fn explore(mut conn: Connection) -> Result<()> {
     loop {
         let mut todo = BTreeSet::new();
         for q in [
-            // "select mac from wifi_explore",
+            "select mac from wifi_explore order by cell limit 16384",
             "select mac from wifi_brute",
         ] {
             for mac in conn.prepare(q)?.query_map((), |row| {
@@ -220,7 +221,7 @@ async fn explore(mut conn: Connection) -> Result<()> {
         let mut requests = Vec::new();
         while let Some(mac) = todo.pop_first() {
             requests.push(fetch(client.clone(), mac.to_string()));
-            if requests.len() == 4096 {
+            if requests.len() == 16384 {
                 break;
             }
         }
@@ -232,7 +233,7 @@ async fn explore(mut conn: Connection) -> Result<()> {
                 locs.insert(mac, loc);
             }
         }
-        eprintln!("<-");
+        eprint!("<- ");
         commit(&mut conn, &mut cache, locs)?;
     }
 
