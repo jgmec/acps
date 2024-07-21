@@ -26,6 +26,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
+    Brute { base: String },
     Coverage,
     Explore,
     ExploreQueue,
@@ -38,6 +39,22 @@ async fn main() -> Result<()> {
 
     let pool = MySqlPool::connect(&dotenvy::var("DATABASE_URL")?).await?;
     match cli.command {
+        Command::Brute { base } => {
+            let mut tx = pool.begin().await?;
+            for e in 0..=255u8 {
+                for f in 0..=255u8 {
+                    let mac = format!("{base}:{f:02x}:{e:02x}");
+                    let mac = MacAddress::from_str(&mac)?;
+                    query!(
+                    "insert ignore into wifi_explore (cell, mac) values (FLOOR((RAND() * 10000000000000)), ?)",
+                    &mac.bytes()[..]
+                )
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+            tx.commit().await?;
+        }
         Command::Coverage => {
             let mut cells = BTreeSet::new();
             query!("select lat, lon from wifi")
@@ -150,6 +167,11 @@ async fn explore(pool: MySqlPool) -> Result<()> {
         let received = wifis.len();
         let mut new = 0;
         for (mac, loc) in wifis {
+            let (lat, lon) = (coord(loc.latitude.unwrap()), coord(loc.longitude.unwrap()));
+            if lat == -180.0 && lon == -180.0 {
+                continue;
+            }
+
             let known = if known_cache.contains(&mac) {
                 true
             } else {
@@ -162,7 +184,6 @@ async fn explore(pool: MySqlPool) -> Result<()> {
 
             if !known {
                 new += 1;
-                let (lat, lon) = (coord(loc.latitude.unwrap()), coord(loc.longitude.unwrap()));
                 println!("{{\"latitude\":{lat},\"longitude\":{lon}}}");
                 query!(
                     "insert into wifi (mac, lat, lon, acc, alt, alt_acc) values (?, ?, ?, ?, ?, ?)",
