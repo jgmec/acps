@@ -38,7 +38,7 @@ impl Location {
 
 fn coord(coord: Option<i64>) -> Option<f64> {
     match coord {
-        None | Some(-180) => None,
+        None | Some(-18000000000) => None,
         Some(x) => Some(x as f64 * 1e-8),
     }
 }

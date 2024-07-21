@@ -27,7 +27,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
-    Brute { base: String },
+    Brute { start: String, count: u64 },
     Coverage,
     Explore,
     ExploreQueue,
@@ -42,22 +42,35 @@ async fn main() -> Result<()> {
     conn.execute_batch(&include_str!("../db.sql"))?;
 
     match cli.command {
-        // Command::Brute { base } => {
-        //     let mut tx = pool.begin().await?;
-        //     for e in 0..=255u8 {
-        //         for f in 0..=255u8 {
-        //             let mac = format!("{base}:{f:02x}:{e:02x}");
-        //             let mac = MacAddress::from_str(&mac)?;
-        //             query!(
-        //             "insert ignore into wifi_explore (cell, mac) values (FLOOR((RAND() * 10000000000000)), ?)",
-        //             &mac.bytes()[..]
-        //         )
-        //             .execute(&mut *tx)
-        //             .await?;
-        //         }
-        //     }
-        //     tx.commit().await?;
-        // }
+        Command::Brute { start, count } => {
+            let start = u64::from(Mac::from_str(&start).unwrap());
+            let end = start + count;
+
+            let mut existing = BTreeSet::new();
+            for q in [
+                "select mac from wifi where mac between ? and ?",
+                "select mac from wifi_explore where mac between ? and ?",
+                "select mac from wifi_fail where mac between ? and ?",
+            ] {
+                for mac in conn.prepare(q)?.query_map((start, end), |row| {
+                    let mac: u64 = row.get(0)?;
+                    Ok(mac)
+                })? {
+                    existing.insert(mac?);
+                }
+            }
+
+            let tx = conn.transaction()?;
+            for mac in start..=end {
+                if !existing.contains(&mac) {
+                    tx.execute(
+                        "insert into wifi_brute (mac) values (?) on conflict do nothing",
+                        (mac,),
+                    )?;
+                }
+            }
+            tx.commit()?;
+        }
         // Command::Coverage => {
         //     let mut cells = BTreeMap::new();
         //     query!("select lat, lon from wifi")
@@ -107,9 +120,7 @@ async fn main() -> Result<()> {
             dbg!(wifis.len());
             let mut locs = BTreeMap::new();
             for (mac, loc) in wifis {
-                if let Some(loc) = loc {
-                    locs.insert(mac, loc);
-                }
+                locs.insert(mac, loc);
             }
             commit(&mut conn, &mut BTreeSet::new(), locs)?;
         }
@@ -122,41 +133,51 @@ async fn main() -> Result<()> {
 fn commit(
     conn: &mut Connection,
     cache: &mut BTreeSet<Mac>,
-    locs: BTreeMap<Mac, Location>,
+    locs: BTreeMap<Mac, Option<Location>>,
 ) -> Result<()> {
     let tx = conn.transaction()?;
 
     let total_macs = locs.len();
     let mut new_macs = 0;
+    let mut failed = 0;
     let mut to_explore = BTreeMap::new();
     for (mac, loc) in locs {
-        let celln = loc.celln();
         let macn = u64::from(mac);
 
-        let existing = if cache.contains(&mac) {
-            true
-        } else {
-            tx.query_row("select count(*) from wifi where mac = ?", (macn,), |row| {
-                let x: usize = row.get(0)?;
-                Ok(x == 1)
-            })?
-        };
-        cache.insert(mac);
+        if let Some(loc) = loc {
+            let existing = if cache.contains(&mac) {
+                true
+            } else {
+                tx.query_row("select count(*) from wifi where mac = ?", (macn,), |row| {
+                    let x: usize = row.get(0)?;
+                    Ok(x == 1)
+                })?
+            };
+            cache.insert(mac);
 
-        if existing {
-            tx.execute("delete from wifi_explore where mac = ?", (macn,))?;
-        } else {
-            println!("{{\"latitude\":{},\"longitude\":{}}}", loc.lat, loc.lon);
-            tx.execute(
-                "insert into wifi (mac, cell, lat, lon) values (?, ?, ?, ?) on conflict do nothing",
-                (macn, celln, loc.lat, loc.lon),
-            )?;
+            if !existing {
+                let celln = loc.celln();
+                println!("{{\"latitude\":{},\"longitude\":{}}}", loc.lat, loc.lon);
+                tx.execute(
+                    "insert into wifi (mac, cell, lat, lon) values (?, ?, ?, ?) on conflict do nothing",
+                    (macn, celln, loc.lat, loc.lon),
+                )?;
 
-            new_macs += 1;
-            to_explore.insert(celln, macn);
+                new_macs += 1;
+                to_explore.insert(celln, macn);
+            }
+        } else {
+            failed += 1;
+            tx.execute("insert into wifi_fail (mac) values (?)", (macn,))?;
         }
+
+        tx.execute("delete from wifi_explore where mac = ?", (macn,))?;
+        tx.execute("delete from wifi_brute where mac = ?", (macn,))?;
     }
-    eprintln!("{total_macs} total, {new_macs} new, {} cached", cache.len());
+    eprintln!(
+        "{total_macs} total, {new_macs} new, {failed} failed, {} cached",
+        cache.len()
+    );
 
     for (celln, macn) in to_explore {
         tx.execute(
@@ -175,15 +196,17 @@ async fn explore(mut conn: Connection) -> Result<()> {
     let mut cache = BTreeSet::new();
 
     loop {
-        let mut todo = Vec::new();
-        for mac in conn
-            .prepare("select mac from wifi_explore")?
-            .query_map((), |row| {
+        let mut todo = BTreeSet::new();
+        for q in [
+            // "select mac from wifi_explore",
+            "select mac from wifi_brute",
+        ] {
+            for mac in conn.prepare(q)?.query_map((), |row| {
                 let mac: u64 = row.get(0)?;
                 Ok(Mac::from(mac))
-            })?
-        {
-            todo.push(mac?);
+            })? {
+                todo.insert(mac?);
+            }
         }
 
         if todo.is_empty() {
@@ -192,17 +215,18 @@ async fn explore(mut conn: Connection) -> Result<()> {
 
         // start requests
         let mut requests = Vec::new();
-        while let Some(mac) = todo.pop() {
+        while let Some(mac) = todo.pop_first() {
             requests.push(fetch(client.clone(), mac.to_string()));
+            if requests.len() == 4096 {
+                break;
+            }
         }
         eprintln!("-> {} requests", requests.len());
         let mut requests = stream::iter(requests).buffer_unordered(64);
         let mut locs = BTreeMap::new();
         while let Some(response) = requests.try_next().await? {
             for (mac, loc) in response {
-                if let Some(loc) = loc {
-                    locs.insert(mac, loc);
-                }
+                locs.insert(mac, loc);
             }
         }
         eprintln!("<-");
