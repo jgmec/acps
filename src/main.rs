@@ -56,22 +56,26 @@ async fn main() -> Result<()> {
             tx.commit().await?;
         }
         Command::Coverage => {
-            let mut cells = BTreeSet::new();
+            let mut cells = BTreeMap::new();
             query!("select lat, lon from wifi")
                 .fetch(&pool)
                 .try_for_each(|x| {
                     let loc = LatLng::new(x.lat, x.lon).unwrap();
                     let cell = loc.to_cell(Resolution::Ten);
-                    cells.insert(cell);
+                    if let Some(x) = cells.get_mut(&cell) {
+                        *x += 1;
+                    } else {
+                        cells.insert(cell, 1usize);
+                    }
 
                     async { Ok(()) } // :)
                 })
                 .await?;
 
-            println!("lat,lon");
-            for cell in cells {
+            println!("lat,lon,count");
+            for (cell, count) in cells {
                 let loc = LatLng::from(cell);
-                println!("{},{}", loc.lat(), loc.lng());
+                println!("{},{},{count}", loc.lat(), loc.lng());
             }
         }
         Command::Explore => explore(pool).await?,
