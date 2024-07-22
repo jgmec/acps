@@ -240,7 +240,7 @@ async fn explore(mut conn: Connection) -> Result<()> {
             }
         }
         eprintln!("-> {} requests", requests.len());
-        let mut requests = stream::iter(requests).buffer_unordered(64);
+        let mut requests = stream::iter(requests).buffer_unordered(128);
         let mut locs = BTreeMap::new();
         while let Some(response) = requests.try_next().await? {
             for (mac, loc) in response {
