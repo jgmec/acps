@@ -144,7 +144,7 @@ fn commit(
     let total_macs = locs.len();
     let mut new_macs = 0;
     let mut failed = 0;
-    let mut to_explore = BTreeMap::new();
+    let mut to_explore = HashMap::new();
     let mut to_cache = BTreeSet::new();
     for (mac, loc) in locs {
         let macn = u64::from(mac);
