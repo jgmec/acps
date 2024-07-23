@@ -1,19 +1,22 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    fs,
+    io::Read,
     str::FromStr,
 };
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use dump::AP;
 use futures::{stream, StreamExt, TryStreamExt};
 use h3o::{CellIndex, LatLng, Resolution};
-use mac_address::MacAddress;
 use macn::Mac;
 use reqwest::Client;
 use rusqlite::Connection;
 
 mod fetch;
 use crate::fetch::{fetch, Location};
+mod dump;
 
 pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/apple.rs"));
@@ -29,6 +32,7 @@ struct Cli {
 enum Command {
     Brute { start: String, count: u64 },
     Coverage,
+    Dump,
     Explore,
     ExploreQueue,
     Query { mac: String },
@@ -75,7 +79,7 @@ async fn main() -> Result<()> {
         }
         Command::Coverage => {
             println!("lat,lon,count");
-            for (res) in conn
+            for res in conn
                 .prepare("select cell, count(*) from wifi group by cell")?
                 .query_map((), |row| {
                     let cell: u64 = row.get(0)?;
@@ -88,6 +92,33 @@ async fn main() -> Result<()> {
                 let loc = LatLng::from(cell);
                 println!("{},{},{count}", loc.lat(), loc.lng());
             }
+        }
+        Command::Dump => {
+            let mut output: Vec<u8> = Vec::new();
+            let mut c = 0;
+            let mut buf = [0; 32];
+            for res in conn
+                .prepare_cached("select mac, lat, lon from wifi order by mac")?
+                .query_map((), |row| {
+                    let mac: u64 = row.get(0)?;
+
+                    let loc = LatLng::new(row.get(1)?, row.get(2)?).unwrap();
+                    let cell = loc.to_cell(Resolution::Thirteen);
+                    Ok((mac, cell))
+                })?
+            {
+                let (mac, cell) = res?;
+                let ap = AP { mac, cell };
+                let data = postcard::to_slice_cobs(&ap, &mut buf)?;
+                output.extend(&data[..]);
+
+                if (c % 1_000_000) == 0 {
+                    println!("{c}");
+                }
+                c += 1;
+            }
+
+            fs::write("wtfps.bin", output)?;
         }
         Command::Explore => explore(conn).await?,
         Command::ExploreQueue => {

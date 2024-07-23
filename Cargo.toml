@@ -8,7 +8,7 @@ anyhow = "1.0.86"
 prost = "0.13.1"
 bytes = "1.6.1"
 reqwest = { version = "0.12.5", features = ["gzip"] }
-h3o = "0.6.4"
+h3o = { version = "0.6.4", features = ["serde"] }
 mac_address = "1.1.7"
 clap = { version = "4.5.9", features = ["derive"] }
 tokio = { version = "1.38.0", features = ["full"] }
@@ -18,6 +18,8 @@ rusqlite = { version = "0.31.0", features = ["bundled"] }
 
 macn = { path = "../macn" }
 tryhard = "0.5.1"
+postcard = { version = "1.0.8", features = ["alloc"] }
+serde = { version = "1.0.204", features = ["derive"] }
 
 [build-dependencies]
 prost-build = "0.13.1"
