@@ -40,6 +40,7 @@ async fn main() -> Result<()> {
 
     let mut conn = Connection::open("wtfps.db")?;
     conn.pragma_update(None, "journal_mode", "wal")?;
+    conn.pragma_update(None, "synchronous", "off")?;
     conn.execute_batch(&include_str!("../db.sql"))?;
 
     match cli.command {
@@ -72,29 +73,22 @@ async fn main() -> Result<()> {
             }
             tx.commit()?;
         }
-        // Command::Coverage => {
-        //     let mut cells = BTreeMap::new();
-        //     query!("select lat, lon from wifi")
-        //         .fetch(&pool)
-        //         .try_for_each(|x| {
-        //             let loc = LatLng::new(x.lat, x.lon).unwrap();
-        //             let cell = loc.to_cell(Resolution::Ten);
-        //             if let Some(x) = cells.get_mut(&cell) {
-        //                 *x += 1;
-        //             } else {
-        //                 cells.insert(cell, 1usize);
-        //             }
-
-        //             async { Ok(()) } // :)
-        //         })
-        //         .await?;
-
-        //     println!("lat,lon,count");
-        //     for (cell, count) in cells {
-        //         let loc = LatLng::from(cell);
-        //         println!("{},{},{count}", loc.lat(), loc.lng());
-        //     }
-        // }
+        Command::Coverage => {
+            println!("lat,lon,count");
+            for (res) in conn
+                .prepare("select cell, count(*) from wifi group by cell")?
+                .query_map((), |row| {
+                    let cell: u64 = row.get(0)?;
+                    let cell = CellIndex::try_from(cell).unwrap();
+                    let count: u64 = row.get(1)?;
+                    Ok((cell, count))
+                })?
+            {
+                let (cell, count) = res?;
+                let loc = LatLng::from(cell);
+                println!("{},{},{count}", loc.lat(), loc.lng());
+            }
+        }
         Command::Explore => explore(conn).await?,
         Command::ExploreQueue => {
             println!("lat,lon");
@@ -128,7 +122,6 @@ async fn main() -> Result<()> {
             }
             commit(&mut conn, &mut BTreeSet::new(), locs)?;
         }
-        _ => todo!(),
     }
 
     Ok(())
