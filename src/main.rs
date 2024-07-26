@@ -1,13 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs,
-    io::Read,
+    fs::File,
+    io::Write,
     str::FromStr,
 };
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use dump::AP;
 use futures::{stream, StreamExt, TryStreamExt};
 use h3o::{CellIndex, LatLng, Resolution};
 use macn::Mac;
@@ -16,7 +15,6 @@ use rusqlite::Connection;
 
 mod fetch;
 use crate::fetch::{fetch, Location};
-mod dump;
 
 pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/apple.rs"));
@@ -45,7 +43,7 @@ async fn main() -> Result<()> {
     let mut conn = Connection::open("wtfps.db")?;
     conn.pragma_update(None, "journal_mode", "wal")?;
     conn.pragma_update(None, "synchronous", "off")?;
-    conn.execute_batch(&include_str!("../db.sql"))?;
+    conn.execute_batch(include_str!("../db.sql"))?;
 
     match cli.command {
         Command::Brute { start, count } => {
@@ -94,31 +92,31 @@ async fn main() -> Result<()> {
             }
         }
         Command::Dump => {
-            let mut output: Vec<u8> = Vec::new();
-            let mut c = 0;
-            let mut buf = [0; 32];
-            for res in conn
+            let f = File::create("wtfps.bin.zst")?;
+            let mut e = zstd::Encoder::new(f, 9)?;
+            for (c, res) in conn
                 .prepare_cached("select mac, lat, lon from wifi order by mac")?
                 .query_map((), |row| {
                     let mac: u64 = row.get(0)?;
 
                     let loc = LatLng::new(row.get(1)?, row.get(2)?).unwrap();
-                    let cell = loc.to_cell(Resolution::Thirteen);
+                    let cell = loc.to_cell(Resolution::Fifteen);
                     Ok((mac, cell))
                 })?
+                .enumerate()
             {
                 let (mac, cell) = res?;
-                let ap = AP { mac, cell };
-                let data = postcard::to_slice_cobs(&ap, &mut buf)?;
-                output.extend(&data[..]);
+                e.write_all(&mac.to_be_bytes())?;
+                e.write_all(&u64::from(cell).to_be_bytes())?;
 
                 if (c % 1_000_000) == 0 {
                     println!("{c}");
                 }
-                c += 1;
+                if c == 650_000_000 {
+                    break;
+                }
             }
-
-            fs::write("wtfps.bin", output)?;
+            e.finish()?;
         }
         Command::Explore => explore(conn).await?,
         Command::ExploreQueue => {
@@ -137,21 +135,13 @@ async fn main() -> Result<()> {
             }
         }
         Command::Query { mac } => {
-            let wifis = fetch(Client::new(), mac).await?;
-            if let Some((_, loc)) = wifis.first() {
-                if let Some(Location { lat, lon }) = loc {
-                    println!(
-                        "https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=12/{lat}/{lon}"
-                    )
-                }
+            let wifis = fetch(Client::new(), Mac::from_str(&mac).unwrap().to_string()).await?;
+            if let Some((_, Some(Location { lat, lon }))) = wifis.first() {
+                println!(
+                    "https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=12/{lat}/{lon}"
+                )
             }
-
             dbg!(wifis.len());
-            let mut locs = BTreeMap::new();
-            for (mac, loc) in wifis {
-                locs.insert(mac, loc);
-            }
-            commit(&mut conn, &mut BTreeSet::new(), locs)?;
         }
     }
 
@@ -240,8 +230,8 @@ async fn explore(mut conn: Connection) -> Result<()> {
     loop {
         let mut todo = BTreeSet::new();
         for q in [
+            "select mac from wifi_brute limit 16384",
             "select mac from wifi_explore order by cell limit 16384",
-            "select mac from wifi_brute",
         ] {
             for mac in conn.prepare(q)?.query_map((), |row| {
                 let mac: u64 = row.get(0)?;

@@ -20,6 +20,7 @@ macn = { path = "../macn" }
 tryhard = "0.5.1"
 postcard = { version = "1.0.8", features = ["alloc"] }
 serde = { version = "1.0.204", features = ["derive"] }
+zstd = "0.13.2"
 
 [build-dependencies]
 prost-build = "0.13.1"

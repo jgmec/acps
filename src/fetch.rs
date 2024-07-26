@@ -33,7 +33,7 @@ impl Location {
             }
         }
 
-        return None;
+        None
     }
 }
 
@@ -50,7 +50,6 @@ pub async fn fetch(client: Client, bssid: String) -> Result<Vec<(Mac, Option<Loc
             bssid,
             location: None,
         }],
-        ..Default::default()
     };
 
     let mut payload = Vec::new();
