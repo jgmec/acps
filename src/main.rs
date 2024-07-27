@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use db::WtfDb;
 use futures::{stream, StreamExt, TryStreamExt};
 use h3c::H3c;
 use h3o::{CellIndex, LatLng, Resolution};
@@ -16,6 +17,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 mod fetch;
 use crate::fetch::{fetch, Location};
+mod db;
 
 pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/apple.rs"));
@@ -40,10 +42,7 @@ enum Command {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let mut conn = Connection::open("wtfps.db")?;
-    conn.pragma_update(None, "journal_mode", "wal")?;
-    conn.pragma_update(None, "synchronous", "off")?;
-    conn.execute_batch(include_str!("../db.sql"))?;
+    let mut db = WtfDb::open()?;
 
     match cli.command {
         Command::Brute { start, count } => {
@@ -64,7 +63,7 @@ async fn main() -> Result<()> {
             //     }
             // }
 
-            let tx = conn.transaction()?;
+            let tx = db.main.transaction()?;
             for mac in start..=end {
                 // if !existing.contains(&mac) {
                 tx.execute(
@@ -78,7 +77,8 @@ async fn main() -> Result<()> {
         Command::Dump => {
             let f = File::create("wtfps.bin.zst")?;
             let mut e = zstd::Encoder::new(f, 9)?;
-            for (c, res) in conn
+            for (c, res) in db
+                .main
                 .prepare_cached("select mac, lat, lon from wifi order by mac")?
                 .query_map((), |row| {
                     let mac: u64 = row.get(0)?;
@@ -102,10 +102,11 @@ async fn main() -> Result<()> {
             }
             e.finish()?;
         }
-        Command::Explore => explore(conn).await?,
+        Command::Explore => explore(db).await?,
         Command::ExploreQueue => {
             println!("lat,lon");
-            for cell in conn
+            for cell in db
+                .main
                 .prepare("select cell from wifi_explore")?
                 .query_map((), |row| {
                     let cell: u64 = row.get(0)?;
@@ -132,101 +133,16 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn commit(
-    conn: &mut Connection,
-    cache: &mut BTreeSet<Mac>,
-    locs: BTreeMap<Mac, Option<Location>>,
-) -> Result<()> {
-    let tx = conn.transaction()?;
-
-    let total_macs = locs.len();
-    let mut new_macs = 0;
-    let mut failed = 0;
-    let mut to_explore = HashMap::new();
-    let mut to_cache = BTreeSet::new();
-    for (mac, loc) in locs {
-        let macn = u64::from(mac);
-
-        if let Some(loc) = loc {
-            let cell = loc.cell();
-            let h3c = H3c::from(cell);
-            let celln = u64::from(cell);
-
-            let mut existing = cache.contains(&mac);
-
-            if !existing {
-                for h3c in h3c.search_area() {
-                    if tx
-                        .prepare_cached("select 1 from wifi where h3c = ? and mac = ?")?
-                        .query_row((h3c.0, macn), |row| Ok(1))
-                        .optional()?
-                        .is_some()
-                    {
-                        existing = true;
-                        break;
-                    }
-                }
-            };
-            to_cache.insert(mac);
-
-            if !existing {
-                tx.prepare_cached(
-                    "insert into wifi (h3c, mac, lat, lon) values (?, ?, ?, ?) on conflict do nothing"
-                )?.execute(
-                    (h3c.0, macn, loc.lat, loc.lon),
-                )?;
-
-                new_macs += 1;
-                to_explore.insert(celln, macn);
-            }
-        } else {
-            failed += 1;
-            tx.prepare_cached("insert into wifi_fail (mac) values (?)")?
-                .execute((macn,))?;
-        }
-
-        tx.prepare_cached("delete from wifi_explore where mac = ?")?
-            .execute((macn,))?;
-        tx.prepare_cached("delete from wifi_brute where mac = ?")?
-            .execute((macn,))?;
-    }
-
-    for (celln, macn) in to_explore {
-        tx.prepare_cached(
-            "insert into wifi_explore (cell, mac) values (?, ?) on conflict do nothing",
-        )?
-        .execute((celln, macn))?;
-        let loc = LatLng::from(CellIndex::try_from(celln)?);
-        println!("{{\"latitude\":{},\"longitude\":{}}}", loc.lat(), loc.lng());
-    }
-
-    // approx 1GB of RAM
-    if cache.len() > 32_000_000 {
-        *cache = to_cache;
-    } else {
-        cache.extend(to_cache);
-    }
-
-    tx.commit()?;
-
-    eprintln!(
-        "{total_macs} total, {new_macs} new, {failed} failed, {} cached",
-        cache.len()
-    );
-    Ok(())
-}
-
-async fn explore(mut conn: Connection) -> Result<()> {
+async fn explore(mut db: WtfDb) -> Result<()> {
     let client = Client::new();
-    let mut cache = BTreeSet::new();
 
     loop {
         let mut todo = BTreeSet::new();
         for q in [
             "select mac from wifi_brute limit 16384",
-            // "select mac from wifi_explore order by cell limit 16384",
+            "select mac from wifi_explore order by cell limit 16384",
         ] {
-            for mac in conn.prepare(q)?.query_map((), |row| {
+            for mac in db.main.prepare(q)?.query_map((), |row| {
                 let mac: u64 = row.get(0)?;
                 Ok(Mac::from(mac))
             })? {
@@ -255,7 +171,7 @@ async fn explore(mut conn: Connection) -> Result<()> {
             }
         }
         eprint!("<- ");
-        commit(&mut conn, &mut cache, locs)?;
+        db.commit(locs)?;
     }
 
     Ok(())
