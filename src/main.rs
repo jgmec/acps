@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     io::Write,
     str::FromStr,
@@ -9,11 +9,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use db::WtfDb;
 use futures::{stream, StreamExt, TryStreamExt};
-use h3c::H3c;
 use h3o::{CellIndex, LatLng, Resolution};
 use macn::Mac;
 use reqwest::Client;
-use rusqlite::{Connection, OptionalExtension};
 
 mod fetch;
 use crate::fetch::{fetch, Location};

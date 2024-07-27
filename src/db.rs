@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use h3c::H3c;
+use h3o::{CellIndex, LatLng};
 use macn::Mac;
 use rusqlite::{Connection, OptionalExtension};
 
@@ -100,7 +101,8 @@ impl WtfDb {
         // write main state
         let tx = self.main.transaction()?;
         {
-            let mut q = tx.prepare("insert into wifi_fail (mac) values (?)")?;
+            let mut q =
+                tx.prepare("insert into wifi_fail (mac) values (?) on conflict do nothing")?;
             for mac in to_fail {
                 q.execute((mac,))?;
             }
@@ -118,6 +120,9 @@ impl WtfDb {
                 "insert into wifi_explore (cell, mac) values (?, ?) on conflict do nothing",
             )?;
             for (cell, mac) in to_explore {
+                let loc = LatLng::from(CellIndex::try_from(cell)?);
+                println!("{{\"latitude\":{},\"longitude\":{}}}", loc.lat(), loc.lng());
+
                 q.execute((cell, mac))?;
             }
         }
