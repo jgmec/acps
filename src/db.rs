@@ -72,11 +72,18 @@ impl WtfDb {
 
             to_delete.insert(macn);
         }
-        eprintln!("{} new, {} failed", to_insert_total, to_fail.len());
+        info!(
+            "{} new, {} failed, {} cached, {} shards open",
+            to_insert_total,
+            to_fail.len(),
+            self.cache.len(),
+            self.shards.len()
+        );
 
         // approx 1GB of RAM
         if self.cache.len() > 32_000_000 {
             self.cache = to_cache;
+            self.truncate()?;
         } else {
             self.cache.extend(to_cache);
         }
@@ -97,6 +104,7 @@ impl WtfDb {
             }
             tx.commit()?;
         }
+        info!("{} new macs to explore", to_explore.len());
 
         // write main state
         let tx = self.main.transaction()?;
@@ -127,6 +135,16 @@ impl WtfDb {
             }
         }
         tx.commit()?;
+
+        Ok(())
+    }
+
+    pub fn truncate(&mut self) -> Result<()> {
+        for (_, shard) in &self.shards {
+            shard.pragma_update(None, "wal_checkpoint", "truncate")?;
+        }
+        self.main
+            .pragma_update(None, "wal_checkpoint", "truncate")?;
 
         Ok(())
     }

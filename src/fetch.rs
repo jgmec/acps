@@ -77,7 +77,13 @@ pub async fn fetch(client: Client, bssid: String) -> Result<Vec<(Mac, Option<Loc
             )
             .body(payload);
 
-        async { anyhow::Ok(req.send().await?.error_for_status()?) }
+        async {
+            let res = req.send().await.and_then(|x| x.error_for_status());
+            if let Err(e) = &res {
+                warn!("{e}")
+            }
+            res
+        }
     })
     .retries(5)
     .await?;

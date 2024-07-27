@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate log;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
@@ -39,6 +42,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
     let mut db = WtfDb::open()?;
 
@@ -132,12 +136,13 @@ async fn main() -> Result<()> {
 }
 
 async fn explore(mut db: WtfDb) -> Result<()> {
-    let client = Client::new();
+    db.truncate()?;
 
+    let client = Client::new();
     loop {
         let mut todo = BTreeSet::new();
         for q in [
-            "select mac from wifi_brute limit 16384",
+            // "select mac from wifi_brute limit 16384",
             "select mac from wifi_explore order by cell limit 16384",
         ] {
             for mac in db.main.prepare(q)?.query_map((), |row| {
@@ -160,15 +165,15 @@ async fn explore(mut db: WtfDb) -> Result<()> {
                 break;
             }
         }
-        eprintln!("-> {} requests", requests.len());
-        let mut requests = stream::iter(requests).buffer_unordered(128);
+        info!("making {} requests", requests.len());
+        let mut requests = stream::iter(requests).buffer_unordered(256);
         let mut locs = BTreeMap::new();
         while let Some(response) = requests.try_next().await? {
             for (mac, loc) in response {
                 locs.insert(mac, loc);
             }
         }
-        eprint!("<- ");
+        info!("received {} macs", locs.len());
         db.commit(locs)?;
     }
 

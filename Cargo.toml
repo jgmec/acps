@@ -17,6 +17,8 @@ macn = { path = "../macn" }
 tryhard = "0.5.1"
 serde = { version = "1.0.204", features = ["derive"] }
 zstd = "0.13.2"
+env_logger = "0.11.5"
+log = "0.4.22"
 
 [build-dependencies]
 prost-build = "0.13.1"
