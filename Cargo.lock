@@ -505,6 +505,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "h3c"
+version = "0.1.0"
+dependencies = [
+ "h3o",
+]
+
+[[package]]
 name = "h3o"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1817,6 +1824,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "h3c",
  "h3o",
  "macn",
  "prost",

@@ -8,10 +8,11 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::{stream, StreamExt, TryStreamExt};
+use h3c::H3c;
 use h3o::{CellIndex, LatLng, Resolution};
 use macn::Mac;
 use reqwest::Client;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 mod fetch;
 use crate::fetch::{fetch, Location};
@@ -29,7 +30,6 @@ struct Cli {
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
     Brute { start: String, count: u64 },
-    Coverage,
     Dump,
     Explore,
     ExploreQueue,
@@ -50,46 +50,30 @@ async fn main() -> Result<()> {
             let start = u64::from(Mac::from_str(&start).unwrap());
             let end = start + count;
 
-            let mut existing = BTreeSet::new();
-            for q in [
-                "select mac from wifi where mac between ? and ?",
-                "select mac from wifi_explore where mac between ? and ?",
-                "select mac from wifi_fail where mac between ? and ?",
-            ] {
-                for mac in conn.prepare(q)?.query_map((start, end), |row| {
-                    let mac: u64 = row.get(0)?;
-                    Ok(mac)
-                })? {
-                    existing.insert(mac?);
-                }
-            }
+            // let mut existing = BTreeSet::new();
+            // for q in [
+            //     "select mac from wifi where mac between ? and ?",
+            //     "select mac from wifi_explore where mac between ? and ?",
+            //     "select mac from wifi_fail where mac between ? and ?",
+            // ] {
+            //     for mac in conn.prepare(q)?.query_map((start, end), |row| {
+            //         let mac: u64 = row.get(0)?;
+            //         Ok(mac)
+            //     })? {
+            //         existing.insert(mac?);
+            //     }
+            // }
 
             let tx = conn.transaction()?;
             for mac in start..=end {
-                if !existing.contains(&mac) {
-                    tx.execute(
-                        "insert into wifi_brute (mac) values (?) on conflict do nothing",
-                        (mac,),
-                    )?;
-                }
+                // if !existing.contains(&mac) {
+                tx.execute(
+                    "insert into wifi_brute (mac) values (?) on conflict do nothing",
+                    (mac,),
+                )?;
+                // }
             }
             tx.commit()?;
-        }
-        Command::Coverage => {
-            println!("lat,lon,count");
-            for res in conn
-                .prepare("select cell, count(*) from wifi group by cell")?
-                .query_map((), |row| {
-                    let cell: u64 = row.get(0)?;
-                    let cell = CellIndex::try_from(cell).unwrap();
-                    let count: u64 = row.get(1)?;
-                    Ok((cell, count))
-                })?
-            {
-                let (cell, count) = res?;
-                let loc = LatLng::from(cell);
-                println!("{},{},{count}", loc.lat(), loc.lng());
-            }
         }
         Command::Dump => {
             let f = File::create("wtfps.bin.zst")?;
@@ -139,9 +123,9 @@ async fn main() -> Result<()> {
             if let Some((_, Some(Location { lat, lon }))) = wifis.first() {
                 println!(
                     "https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=12/{lat}/{lon}"
-                )
+                );
+                dbg!(wifis.len());
             }
-            dbg!(wifis.len());
         }
     }
 
@@ -164,23 +148,32 @@ fn commit(
         let macn = u64::from(mac);
 
         if let Some(loc) = loc {
-            let existing = if cache.contains(&mac) {
-                true
-            } else {
-                tx.prepare_cached("select count(*) from wifi where mac = ?")?
-                    .query_row((macn,), |row| {
-                        let x: usize = row.get(0)?;
-                        Ok(x == 1)
-                    })?
+            let cell = loc.cell();
+            let h3c = H3c::from(cell);
+            let celln = u64::from(cell);
+
+            let mut existing = cache.contains(&mac);
+
+            if !existing {
+                for h3c in h3c.search_area() {
+                    if tx
+                        .prepare_cached("select 1 from wifi where h3c = ? and mac = ?")?
+                        .query_row((h3c.0, macn), |row| Ok(1))
+                        .optional()?
+                        .is_some()
+                    {
+                        existing = true;
+                        break;
+                    }
+                }
             };
             to_cache.insert(mac);
 
             if !existing {
-                let celln = loc.celln();
                 tx.prepare_cached(
-                    "insert into wifi (mac, cell, lat, lon) values (?, ?, ?, ?) on conflict do nothing"
+                    "insert into wifi (h3c, mac, lat, lon) values (?, ?, ?, ?) on conflict do nothing"
                 )?.execute(
-                    (macn, celln, loc.lat, loc.lon),
+                    (h3c.0, macn, loc.lat, loc.lon),
                 )?;
 
                 new_macs += 1;
@@ -231,7 +224,7 @@ async fn explore(mut conn: Connection) -> Result<()> {
         let mut todo = BTreeSet::new();
         for q in [
             "select mac from wifi_brute limit 16384",
-            "select mac from wifi_explore order by cell limit 16384",
+            // "select mac from wifi_explore order by cell limit 16384",
         ] {
             for mac in conn.prepare(q)?.query_map((), |row| {
                 let mac: u64 = row.get(0)?;

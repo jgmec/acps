@@ -1,12 +1,10 @@
 create table if not exists wifi (
-    mac integer not null primary key,
-    cell integer not null,
+    h3c integer not null,
+    mac integer not null,
     lat real not null,
     lon real not null,
-    found_at integer not null default (unixepoch())
+    primary key (h3c, mac)
 );
-
-create index if not exists wifi_cell on wifi (cell);
 
 create table if not exists wifi_explore (
     mac integer not null primary key,

@@ -17,10 +17,6 @@ impl Location {
         let loc = LatLng::new(self.lat, self.lon).expect("invalid location");
         loc.to_cell(Resolution::Ten)
     }
-
-    pub fn celln(&self) -> u64 {
-        self.cell().into()
-    }
 }
 
 impl Location {
