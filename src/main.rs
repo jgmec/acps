@@ -15,6 +15,7 @@ use futures::{stream, StreamExt, TryStreamExt};
 use h3o::{CellIndex, LatLng, Resolution};
 use macn::Mac;
 use reqwest::Client;
+use rusqlite::Connection;
 
 mod fetch;
 use crate::fetch::{fetch, Location};
@@ -37,6 +38,7 @@ enum Command {
     Explore,
     ExploreQueue,
     Query { mac: String },
+    Seed,
 }
 
 #[tokio::main]
@@ -131,6 +133,25 @@ async fn main() -> Result<()> {
             } else {
                 println!("not found")
             }
+        }
+        Command::Seed => {
+            let seeds = Connection::open("seeds.db")?;
+
+            let mut locs = BTreeMap::new();
+            for res in seeds
+                .prepare("select bssid, lat, lon from seeds")?
+                .query_map((), |row| {
+                    let bssid: u64 = row.get(0)?;
+                    let lat: f64 = row.get(1)?;
+                    let lon: f64 = row.get(2)?;
+                    Ok((bssid, lat, lon))
+                })?
+            {
+                let (bssid, lat, lon) = res?;
+                let mac = Mac::from_str(&format!("{bssid:012x}")).unwrap();
+                locs.insert(mac, Some(Location { lat, lon }));
+            }
+            db.commit(locs)?;
         }
     }
 
