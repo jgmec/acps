@@ -40,14 +40,7 @@ fn coord(coord: Option<i64>) -> Option<f64> {
     }
 }
 
-pub async fn fetch(client: Client, bssid: String) -> Result<Vec<(Mac, Option<Location>)>> {
-    let x = AppleWLoc {
-        wifi_devices: vec![WifiDevice {
-            bssid,
-            location: None,
-        }],
-    };
-
+pub async fn request(client: Client, x: AppleWLoc) -> Result<AppleWLoc> {
     let mut payload = Vec::new();
 
     // header
@@ -88,7 +81,22 @@ pub async fn fetch(client: Client, bssid: String) -> Result<Vec<(Mac, Option<Loc
     .retries(5)
     .await?;
 
-    let x = AppleWLoc::decode(&resp.bytes().await?[10..])?;
+    Ok(AppleWLoc::decode(&resp.bytes().await?[10..])?)
+}
+
+pub async fn fetch(client: Client, bssid: String) -> Result<Vec<(Mac, Option<Location>)>> {
+    let x = request(
+        client,
+        AppleWLoc {
+            wifi_devices: vec![WifiDevice {
+                bssid,
+                location: None,
+            }],
+            ..Default::default()
+        },
+    )
+    .await?;
+
     let mut output = Vec::new();
     for x in x.wifi_devices {
         let mac: Mac = match x.bssid.parse() {

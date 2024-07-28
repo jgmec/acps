@@ -11,6 +11,19 @@ message WifiDevice {
 
 message AppleWLoc {
   repeated WifiDevice wifi_devices = 2;
+
+  repeated CellTower cell_tower_response = 22;
+  optional CellTower cell_tower_request = 25;
+}
+
+message CellTower {
+  uint32 mcc = 1;
+  uint32 mnc = 2;
+  uint32 cell_id = 3;
+  uint32 tac_id = 4;
+  optional Location location = 5;
+  optional uint32 uarfcn = 6;
+  optional uint32 pid = 7;
 }
 
 message Location {

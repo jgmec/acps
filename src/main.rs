@@ -11,9 +11,11 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use db::WtfDb;
+use fetch::request;
 use futures::{stream, StreamExt, TryStreamExt};
 use h3o::{CellIndex, LatLng, Resolution};
 use macn::Mac;
+use protobuf::{AppleWLoc, CellTower};
 use reqwest::Client;
 use rusqlite::Connection;
 
@@ -33,11 +35,22 @@ struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
-    Brute { start: String, count: u64 },
+    Brute {
+        start: String,
+        count: u64,
+    },
     Dump,
     Explore,
     ExploreQueue,
-    Query { mac: String },
+    Query {
+        mac: String,
+    },
+    QueryCell {
+        country: u32,
+        network: u32,
+        cell: u32,
+        area: u32,
+    },
     Seed,
 }
 
@@ -152,6 +165,28 @@ async fn main() -> Result<()> {
                 locs.insert(mac, Some(Location { lat, lon }));
             }
             db.commit(locs)?;
+        }
+        Command::QueryCell {
+            country,
+            network,
+            cell,
+            area,
+        } => {
+            let x = request(
+                Client::new(),
+                AppleWLoc {
+                    cell_tower_request: Some(CellTower {
+                        mcc: country,
+                        mnc: network,
+                        cell_id: cell,
+                        tac_id: area,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            println!("{x:#?}")
         }
     }
 
