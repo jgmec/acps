@@ -150,6 +150,13 @@ impl WtfDb {
     }
 
     fn shard(&mut self, i: u16) -> Result<&mut Connection> {
+        if self.shards.len() >= 2048 {
+            self.truncate()?;
+            while let Some((_, shard)) = self.shards.pop_first() {
+                shard.close().unwrap();
+            }
+        }
+
         if !self.shards.contains_key(&i) {
             let conn = Connection::open(format!("shards/{i}.db"))?;
             conn.pragma_update(None, "journal_mode", "wal")?;
