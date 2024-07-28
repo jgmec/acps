@@ -128,6 +128,8 @@ async fn main() -> Result<()> {
                     "https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=12/{lat}/{lon}"
                 );
                 dbg!(wifis.len());
+            } else {
+                println!("not found")
             }
         }
     }
@@ -142,7 +144,7 @@ async fn explore(mut db: WtfDb) -> Result<()> {
     loop {
         let mut todo = BTreeSet::new();
         for q in [
-            // "select mac from wifi_brute limit 16384",
+            "select mac from wifi_brute limit 16384",
             "select mac from wifi_explore order by cell limit 16384",
         ] {
             for mac in db.main.prepare(q)?.query_map((), |row| {

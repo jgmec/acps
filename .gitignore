@@ -4,3 +4,6 @@
 *.db-wal
 *.bin
 *.bin.zst
+
+# samply
+profile.json
