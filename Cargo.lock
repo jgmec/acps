@@ -530,6 +530,7 @@ dependencies = [
 [[package]]
 name = "h3c"
 version = "0.1.0"
+source = "git+https://codeberg.org/joelkoen/h3c#2a60f159d140aea62b8a70fb31adfb792b7dbbf6"
 dependencies = [
  "h3o",
 ]
@@ -805,6 +806,7 @@ checksum = "a7a70ba024b9dc04c27ea2f0c0548feb474ec5c54bba33a7f72f873a39d07b24"
 [[package]]
 name = "macn"
 version = "0.1.0"
+source = "git+https://codeberg.org/joelkoen/macn#db98b5043fae6a2839fcb68d49f8ac7fc77d3ccc"
 
 [[package]]
 name = "memchr"

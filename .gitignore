@@ -1,4 +1,6 @@
 /target
+result*
+
 *.db
 *.db-shm
 *.db-wal

@@ -7,18 +7,19 @@ edition = "2021"
 anyhow = "1.0.86"
 prost = "0.13.1"
 reqwest = { version = "0.12.5", features = ["gzip"] }
-h3c = { path = "../h3c" }
 h3o = { version = "0.6.4" }
 clap = { version = "4.5.9", features = ["derive"] }
 tokio = { version = "1.38.0", features = ["macros", "rt-multi-thread"] }
 futures = "0.3.30"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
-macn = { path = "../macn" }
 tryhard = "0.5.1"
 serde = { version = "1.0.204", features = ["derive"] }
 zstd = "0.13.2"
 env_logger = "0.11.5"
 log = "0.4.22"
+
+h3c = { git = "https://codeberg.org/joelkoen/h3c" }
+macn = { git = "https://codeberg.org/joelkoen/macn" }
 
 [build-dependencies]
 prost-build = "0.13.1"

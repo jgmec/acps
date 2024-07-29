@@ -17,17 +17,22 @@
         lib = pkgs.lib;
         craneLib = crane.lib.${system};
       in
+      with pkgs;
       {
         packages.default = craneLib.buildPackage {
           src = lib.cleanSourceWith {
             src = craneLib.path ./.;
             filter = path: type:
               lib.hasSuffix ".sql" path
+              || lib.hasSuffix ".proto" path
               || craneLib.filterCargoSources path type;
           };
+
+          buildInputs = [ pkg-config protobuf ];
+          nativeBuildInputs = [ openssl ];
         };
 
-        devShells.default = with pkgs; mkShell {
+        devShells.default = mkShell {
           buildInputs = [
             sqlx-cli
           ];
