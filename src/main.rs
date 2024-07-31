@@ -39,6 +39,7 @@ enum Command {
         start: String,
         count: u64,
     },
+    Coverage,
     Dump,
     Explore,
     ExploreQueue,
@@ -90,6 +91,36 @@ async fn main() -> Result<()> {
                 // }
             }
             tx.commit()?;
+        }
+        Command::Coverage => {
+            let mut cells = BTreeMap::new();
+            for i in 0..=65535 {
+                if let Some(shard) = db.shard_if_exists(i)? {
+                    for res in shard
+                        .prepare("select lat, lon from wifi")?
+                        .query_map((), |row| {
+                            let loc = Location {
+                                lat: row.get(0)?,
+                                lon: row.get(1)?,
+                            };
+                            Ok(loc.cell())
+                        })?
+                    {
+                        let cell = res?;
+                        if let Some(count) = cells.get_mut(&cell) {
+                            *count += 1;
+                        } else {
+                            cells.insert(cell, 1usize);
+                        }
+                    }
+                    info!("loaded shard {i}, {} total", cells.len());
+                }
+            }
+            for (cell, count) in cells {
+                let pos = LatLng::from(cell);
+                let (lat, lon) = (pos.lat(), pos.lng());
+                println!("{lat},{lon},{count}");
+            }
         }
         Command::Dump => {
             let f = File::create("wtfps.bin.zst")?;

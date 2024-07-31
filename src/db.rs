@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use anyhow::Result;
 use h3c::H3c;
@@ -149,6 +152,14 @@ impl WtfDb {
         Ok(())
     }
 
+    pub fn shard_if_exists(&mut self, i: u16) -> Result<Option<&mut Connection>> {
+        if shard_path(i).exists() {
+            Ok(Some(self.shard(i)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn shard(&mut self, i: u16) -> Result<&mut Connection> {
         if self.shards.len() >= 2048 {
             self.truncate()?;
@@ -158,7 +169,7 @@ impl WtfDb {
         }
 
         if !self.shards.contains_key(&i) {
-            let conn = Connection::open(format!("shards/{i}.db"))?;
+            let conn = Connection::open(shard_path(i))?;
             conn.pragma_update(None, "journal_mode", "wal")?;
             conn.pragma_update(None, "synchronous", "off")?;
             conn.execute_batch(include_str!("../db-shard.sql"))?;
@@ -167,4 +178,8 @@ impl WtfDb {
 
         Ok(self.shards.get_mut(&i).unwrap())
     }
+}
+
+fn shard_path(i: u16) -> PathBuf {
+    format!("shards/{i}.db").into()
 }
