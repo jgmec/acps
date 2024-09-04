@@ -57,10 +57,14 @@ async fn main() -> Result<()> {
 async fn explore(pool: PgPool) -> Result<()> {
     let client = Client::new();
     loop {
-        let todo = query_scalar!("select mac from wifi where last_crawled is null limit 16384")
+        let mut todo = query_scalar!("select mac from wifi_try limit 16384")
             .fetch_all(&pool)
             .await?;
-
+        if todo.is_empty() {
+            todo = query_scalar!("select mac from wifi where last_crawled is null limit 16384")
+                .fetch_all(&pool)
+                .await?;
+        }
         if todo.is_empty() {
             break;
         }
@@ -108,6 +112,9 @@ async fn explore(pool: PgPool) -> Result<()> {
             )
             .execute(&mut *tx)
             .await?;
+            query!("delete from wifi_try where mac = $1", mac)
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
     }
