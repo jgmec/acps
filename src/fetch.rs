@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
-use h3o::{CellIndex, LatLng, Resolution};
-use macn::Mac;
+use mac6::Mac;
+use mac_address::MacAddress;
 use prost::Message;
 use reqwest::Client;
 use tryhard::retry_fn;
@@ -10,13 +10,9 @@ use crate::protobuf::{AppleWLoc, WifiDevice};
 pub struct Location {
     pub lat: f64,
     pub lon: f64,
-}
-
-impl Location {
-    pub fn cell(&self) -> CellIndex {
-        let loc = LatLng::new(self.lat, self.lon).expect("invalid location");
-        loc.to_cell(Resolution::Ten)
-    }
+    pub acc: i64,
+    pub alt: i64,
+    pub alt_acc: i64,
 }
 
 impl Location {
@@ -25,7 +21,13 @@ impl Location {
         let (lat, lon) = (coord(lat), coord(lon));
         if let Some(lat) = lat {
             if let Some(lon) = lon {
-                return Some(Location { lat, lon });
+                return Some(Location {
+                    lat,
+                    lon,
+                    acc: value.horizontal_accuracy.unwrap_or_default(),
+                    alt: value.altitude.unwrap_or_default(),
+                    alt_acc: value.vertical_accuracy.unwrap_or_default(),
+                });
             }
         }
 
@@ -84,7 +86,7 @@ pub async fn request(client: Client, x: AppleWLoc) -> Result<AppleWLoc> {
     Ok(AppleWLoc::decode(&resp.bytes().await?[10..])?)
 }
 
-pub async fn fetch(client: Client, bssid: String) -> Result<Vec<(Mac, Option<Location>)>> {
+pub async fn fetch(client: Client, bssid: String) -> Result<Vec<(MacAddress, Option<Location>)>> {
     let x = request(
         client,
         AppleWLoc {
@@ -107,7 +109,7 @@ pub async fn fetch(client: Client, bssid: String) -> Result<Vec<(Mac, Option<Loc
             x.location
                 .expect("response uses (-180, -180) to represent not found"),
         );
-        output.push((mac, loc));
+        output.push((MacAddress::new(mac.0), loc));
     }
     Ok(output)
 }

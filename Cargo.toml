@@ -18,8 +18,10 @@ zstd = "0.13.2"
 env_logger = "0.11.5"
 log = "0.4.22"
 
-h3c = { git = "https://codeberg.org/joelkoen/h3c" }
-macn = { git = "https://codeberg.org/joelkoen/macn" }
+sqlx = { version = "0.8.0", features = ["postgres", "runtime-tokio", "macros", "mac_address"] }
+dotenvy = "0.15.7"
+mac6 = "1.1.0"
+mac_address = "1.1.7"
 
 [build-dependencies]
 prost-build = "0.13.1"
