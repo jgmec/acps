@@ -59,7 +59,7 @@ async fn explore(pool: PgPool) -> Result<()> {
     let client = Client::new();
     loop {
         let todo = query_scalar!(
-            "select mac from wifi where last_crawled is null order by cell limit 16384"
+            "select mac from wifi where last_crawled is null order by cell desc limit 16384"
         )
         .fetch_all(&pool)
         .await?;
