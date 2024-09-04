@@ -6,6 +6,7 @@ use std::{collections::BTreeMap, str::FromStr};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::{stream, StreamExt, TryStreamExt};
+use indicatif::ProgressBar;
 use mac6::Mac;
 use reqwest::Client;
 use sqlx::{query, query_scalar, PgPool};
@@ -86,6 +87,7 @@ async fn explore(pool: PgPool) -> Result<()> {
         info!("received {} macs", locs.len());
 
         let mut tx = pool.begin().await?;
+        let pb = ProgressBar::new(locs.len() as u64);
         for (mac, loc) in locs {
             if let Some(loc) = loc {
                 query!(
@@ -104,6 +106,7 @@ async fn explore(pool: PgPool) -> Result<()> {
                     mac,
                 ).execute(&mut *tx).await?;
             }
+            pb.inc(1);
         }
         for mac in todo {
             query!(
