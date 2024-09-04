@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use h3o::{CellIndex, LatLng};
 use mac6::Mac;
 use mac_address::MacAddress;
 use prost::Message;
@@ -32,6 +33,16 @@ impl Location {
         }
 
         None
+    }
+
+    pub fn cell(&self) -> i64 {
+        let cell = CellIndex::from(
+            LatLng::new(self.lat, self.lon)
+                .unwrap()
+                .to_cell(h3o::Resolution::Eleven),
+        );
+        let cell: u64 = cell.into();
+        cell as i64
     }
 }
 

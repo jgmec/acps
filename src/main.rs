@@ -58,14 +58,11 @@ async fn main() -> Result<()> {
 async fn explore(pool: PgPool) -> Result<()> {
     let client = Client::new();
     loop {
-        let mut todo = query_scalar!("select mac from wifi_try limit 16384")
-            .fetch_all(&pool)
-            .await?;
-        if todo.is_empty() {
-            todo = query_scalar!("select mac from wifi where last_crawled is null limit 16384")
-                .fetch_all(&pool)
-                .await?;
-        }
+        let todo = query_scalar!(
+            "select mac from wifi where last_crawled is null order by cell limit 16384"
+        )
+        .fetch_all(&pool)
+        .await?;
         if todo.is_empty() {
             break;
         }
@@ -91,8 +88,15 @@ async fn explore(pool: PgPool) -> Result<()> {
         for (mac, loc) in locs {
             if let Some(loc) = loc {
                 query!(
-                    "insert into wifi (mac, lat, lon, acc, alt, alt_acc) values ($1, $2, $3, $4, $5, $6) on conflict (mac) do update set lat = $2, lon = $3, acc = $4, alt = $5, alt_acc = $6, last_seen = current_timestamp",
+                    "insert into wifi (
+                        mac, cell, lat, lon, acc, alt, alt_acc, first_seen, last_seen
+                    ) values (
+                        $1, $2, $3, $4, $5, $6, $7, current_timestamp, current_timestamp
+                    ) on conflict (mac) do update set
+                    cell = $2, lat = $3, lon = $4, acc = $5, alt = $6, alt_acc = $7, first_seen = coalesce(wifi.first_seen, current_timestamp), last_seen = current_timestamp
+                    ",
                     mac,
+                    loc.cell(),
                     loc.lat,
                     loc.lon,
                     loc.acc,
@@ -102,7 +106,7 @@ async fn explore(pool: PgPool) -> Result<()> {
             } else {
                 // last_seen isn't changed as this is as last_crawled will be updated anyway
                 query!(
-                    "update wifi set lat = null, lon = null, acc = null, alt = null, alt_acc = null where mac = $1",
+                    "update wifi set cell = null, lat = null, lon = null, acc = null, alt = null, alt_acc = null where mac = $1",
                     mac,
                 ).execute(&mut *tx).await?;
             }
@@ -115,9 +119,6 @@ async fn explore(pool: PgPool) -> Result<()> {
             )
             .execute(&mut *tx)
             .await?;
-            query!("delete from wifi_try where mac = $1", mac)
-                .execute(&mut *tx)
-                .await?;
         }
         tx.commit().await?;
     }
