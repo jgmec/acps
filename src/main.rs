@@ -112,6 +112,8 @@ async fn explore(pool: PgPool) -> Result<()> {
             }
             pb.inc(1);
         }
+        pb.finish_and_clear();
+        let pb = ProgressBar::new(todo.len() as u64);
         for mac in todo {
             query!(
                 "update wifi set last_crawled = current_timestamp where mac = $1",
@@ -119,8 +121,12 @@ async fn explore(pool: PgPool) -> Result<()> {
             )
             .execute(&mut *tx)
             .await?;
+            pb.inc(1);
         }
+        pb.finish_and_clear();
+        let pb = ProgressBar::new_spinner();
         tx.commit().await?;
+        pb.finish_and_clear();
     }
 
     Ok(())
