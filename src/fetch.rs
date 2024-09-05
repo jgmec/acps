@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{bail, Result};
 use h3o::{CellIndex, LatLng};
 use mac6::Mac;
@@ -81,7 +83,8 @@ pub async fn request(client: Client, x: AppleWLoc) -> Result<AppleWLoc> {
                 "user-agent",
                 "locationd/1753.17 CFNetwork/711.1.12 Darwin/14.0.0",
             )
-            .body(payload);
+            .body(payload)
+            .timeout(Duration::from_secs(10));
 
         async {
             let res = req.send().await.and_then(|x| x.error_for_status());
