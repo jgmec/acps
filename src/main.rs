@@ -36,6 +36,7 @@ async fn main() -> Result<()> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
     let pool = PgPool::connect(&dotenvy::var("DATABASE_URL")?).await?;
+    sqlx::migrate!().run(&pool).await?;
 
     match cli.command {
         Command::Explore => explore(pool).await?,
