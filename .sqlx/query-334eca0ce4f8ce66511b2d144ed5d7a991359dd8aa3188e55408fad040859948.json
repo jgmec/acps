@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select mac from wifi where last_crawled is null order by cell asc limit 16384",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "mac",
+        "type_info": "Macaddr"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "334eca0ce4f8ce66511b2d144ed5d7a991359dd8aa3188e55408fad040859948"
+}
