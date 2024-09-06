@@ -1,13 +1,8 @@
 {
   inputs = {
-    nixpkgs.url = "github:joelkoen/nixpkgs";
-
-    crane = {
-      url = "github:ipetkov/crane";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
+    crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
+    nixpkgs.url = "github:joelkoen/nixpkgs";
   };
 
   outputs = { nixpkgs, crane, flake-utils, ... }:
@@ -15,7 +10,7 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         lib = pkgs.lib;
-        craneLib = crane.lib.${system};
+        craneLib = crane.mkLib pkgs;
       in
       with pkgs;
       {
@@ -23,7 +18,8 @@
           src = lib.cleanSourceWith {
             src = craneLib.path ./.;
             filter = path: type:
-              lib.hasSuffix ".sql" path
+              lib.hasInfix "/.sqlx" path
+              || lib.hasSuffix ".sql" path
               || lib.hasSuffix ".proto" path
               || craneLib.filterCargoSources path type;
           };
@@ -34,6 +30,7 @@
 
         devShells.default = mkShell {
           buildInputs = [
+            protobuf
             sqlx-cli
           ];
         };
