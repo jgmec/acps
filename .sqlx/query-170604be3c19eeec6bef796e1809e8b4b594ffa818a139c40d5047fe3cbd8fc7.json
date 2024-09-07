@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "update wifi set last_crawled = current_timestamp where mac = $1",
+  "query": "delete from wifi_todo where mac = $1",
   "describe": {
     "columns": [],
     "parameters": {
@@ -10,5 +10,5 @@
     },
     "nullable": []
   },
-  "hash": "a1500d7bead8222e0256e8fe67b6f1ccddbca91cc895ea05628bb88168cb5f5b"
+  "hash": "170604be3c19eeec6bef796e1809e8b4b594ffa818a139c40d5047fe3cbd8fc7"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select mac from wifi where last_crawled is null order by cell asc limit 16384",
+  "query": "select mac from wifi_todo limit 16834",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "334eca0ce4f8ce66511b2d144ed5d7a991359dd8aa3188e55408fad040859948"
+  "hash": "68ed240296f46ed39fe7e49242777428eaf659a1b10e71ec1b6e2856fe3e2a86"
 }

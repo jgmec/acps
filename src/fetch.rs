@@ -41,7 +41,7 @@ impl Location {
         let cell = CellIndex::from(
             LatLng::new(self.lat, self.lon)
                 .unwrap()
-                .to_cell(h3o::Resolution::Eleven),
+                .to_cell(h3o::Resolution::Ten),
         );
         let cell: u64 = cell.into();
         cell as i64

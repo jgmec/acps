@@ -1,7 +1,10 @@
 #[macro_use]
 extern crate log;
 
-use std::{collections::BTreeMap, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str::FromStr,
+};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -59,16 +62,21 @@ async fn main() -> Result<()> {
 async fn explore(pool: PgPool) -> Result<()> {
     let client = Client::new();
     loop {
-        let todo = query_scalar!(
-            "select mac from wifi where last_crawled is null order by cell asc limit 16384"
-        )
-        .fetch_all(&pool)
-        .await?;
+        let mut todo = query_scalar!("select mac from wifi_todo limit 16834")
+            .fetch_all(&pool)
+            .await?;
         if todo.is_empty() {
-            break;
+            todo = query_scalar!("select distinct on (B.cell) mac from wifi_seen A right join wifi_cell B on A.cell = B.cell where not A.gone and B.last_crawled is null")
+            .fetch_all(&pool)
+            .await?;
+            if todo.is_empty() {
+                break;
+            }
         }
 
-        // start requests
+        let todo = BTreeSet::from_iter(todo);
+
+        // queue requests
         let mut requests = Vec::new();
         for mac in &todo {
             requests.push(fetch(client.clone(), mac.to_string()));
@@ -86,48 +94,62 @@ async fn explore(pool: PgPool) -> Result<()> {
 
         let mut tx = pool.begin().await?;
         let pb = ProgressBar::new(locs.len() as u64);
+
+        let mut crawled_cells = BTreeSet::new();
+        let mut seen_cells = BTreeSet::new();
         for (mac, loc) in locs {
             if let Some(loc) = loc {
+                let cell = loc.cell();
                 query!(
-                    "insert into wifi (
-                        mac, cell, lat, lon, acc, alt, alt_acc, first_seen, last_seen
+                    "insert into wifi_seen (
+                        mac, cell, lat, lon
                     ) values (
-                        $1, $2, $3, $4, $5, $6, $7, current_timestamp, current_timestamp
-                    ) on conflict (mac) do update set
-                    cell = $2, lat = $3, lon = $4, acc = $5, alt = $6, alt_acc = $7, first_seen = coalesce(wifi.first_seen, current_timestamp), last_seen = current_timestamp
-                    ",
+                        $1, $2, $3, $4
+                    ) on conflict (mac) do update set cell = $2, lat = $3, lon = $4",
                     mac,
-                    loc.cell(),
+                    cell,
                     loc.lat,
                     loc.lon,
-                    loc.acc,
-                    loc.alt,
-                    loc.alt_acc,
-                ).execute(&mut *tx).await?;
+                )
+                .execute(&mut *tx)
+                .await?;
+
+                seen_cells.insert(cell);
+                if todo.contains(&mac) {
+                    crawled_cells.insert(cell);
+                }
             } else {
-                // last_seen isn't changed as this is as last_crawled will be updated anyway
-                query!(
-                    "update wifi set cell = null, lat = null, lon = null, acc = null, alt = null, alt_acc = null where mac = $1",
-                    mac,
-                ).execute(&mut *tx).await?;
+                query!("update wifi_seen set gone = true where mac = $1", mac,)
+                    .execute(&mut *tx)
+                    .await?;
             }
             pb.inc(1);
         }
         pb.finish_and_clear();
-        let pb = ProgressBar::new(todo.len() as u64);
+
         for mac in todo {
+            query!("delete from wifi_todo where mac = $1", mac)
+                .execute(&mut *tx)
+                .await?;
+        }
+        for cell in seen_cells {
             query!(
-                "update wifi set last_crawled = current_timestamp where mac = $1",
-                mac
+                "insert into wifi_cell (cell) values ($1) on conflict (cell) do nothing",
+                cell
             )
             .execute(&mut *tx)
             .await?;
-            pb.inc(1);
         }
-        pb.finish_and_clear();
-        let pb = ProgressBar::new_spinner();
+        for cell in crawled_cells {
+            query!(
+                "update wifi_cell set last_crawled = current_timestamp where cell = $1",
+                cell
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+
         tx.commit().await?;
-        pb.finish_and_clear();
     }
 
     Ok(())
