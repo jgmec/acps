@@ -66,7 +66,7 @@ async fn explore(pool: PgPool) -> Result<()> {
             .fetch_all(&pool)
             .await?;
         if todo.is_empty() {
-            todo = query_scalar!("select distinct on (B.cell) mac from wifi_seen A right join wifi_cell B on A.cell = B.cell where not A.gone and B.last_crawled is null")
+            todo = query_scalar!("select distinct on (B.cell) mac from wifi_seen A right join wifi_cell B on A.cell = B.cell where not A.gone and B.last_crawled is null limit 16834")
             .fetch_all(&pool)
             .await?;
             if todo.is_empty() {
