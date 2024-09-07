@@ -124,14 +124,13 @@ async fn explore(pool: PgPool) -> Result<()> {
                     .await?;
             }
             pb.inc(1);
-        }
-        pb.finish_and_clear();
 
-        for mac in todo {
             query!("delete from wifi_todo where mac = $1", mac)
                 .execute(&mut *tx)
                 .await?;
         }
+        pb.finish_and_clear();
+
         for cell in seen_cells {
             query!(
                 "insert into wifi_cell (cell) values ($1) on conflict (cell) do nothing",
