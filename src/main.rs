@@ -62,11 +62,11 @@ async fn main() -> Result<()> {
 async fn explore(pool: PgPool) -> Result<()> {
     let client = Client::new();
     loop {
-        let mut todo = query_scalar!("select mac from wifi_todo limit 16834")
+        let mut todo = query_scalar!("select mac from wifi_todo limit 4096")
             .fetch_all(&pool)
             .await?;
         if todo.is_empty() {
-            todo = query_scalar!("select distinct on (B.cell) mac from wifi_seen A right join wifi_cell B on A.cell = B.cell where not A.gone and B.last_crawled is null limit 16834")
+            todo = query_scalar!("select distinct on (B.cell) mac from wifi_seen A right join wifi_cell B on A.cell = B.cell where not A.gone and B.last_crawled is null limit 1024")
             .fetch_all(&pool)
             .await?;
             if todo.is_empty() {
