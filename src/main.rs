@@ -12,7 +12,7 @@ use futures::{stream, StreamExt, TryStreamExt};
 use indicatif::ProgressBar;
 use mac6::Mac;
 use reqwest::Client;
-use sqlx::{query, query_scalar, PgPool};
+use sqlx::{query, query_file, query_scalar, PgPool};
 
 mod fetch;
 use crate::fetch::{fetch, Location};
@@ -62,16 +62,21 @@ async fn main() -> Result<()> {
 async fn explore(pool: PgPool) -> Result<()> {
     let client = Client::new();
     loop {
-        let mut todo = query_scalar!("select mac from wifi_todo limit 4096")
+        let mut todo = query_scalar!("select mac from wifi_todo order by cell limit 4096")
             .fetch_all(&pool)
             .await?;
         if todo.is_empty() {
-            todo = query_scalar!("select distinct on (B.cell) mac from wifi_seen A right join wifi_cell B on A.cell = B.cell where not A.gone and B.last_crawled is null limit 1024")
-            .fetch_all(&pool)
-            .await?;
-            if todo.is_empty() {
-                break;
-            }
+            query_file!("queries/wifi_cell_todo.sql")
+                .execute(&pool)
+                .await?;
+            todo = query_scalar!("select mac from wifi_todo order by cell limit 4096")
+                .fetch_all(&pool)
+                .await?;
+        }
+
+        if todo.is_empty() {
+            info!("nothing to do");
+            break;
         }
 
         let todo = BTreeSet::from_iter(todo);

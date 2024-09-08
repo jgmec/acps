@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select distinct on (B.cell) mac from wifi_seen A right join wifi_cell B on A.cell = B.cell where not A.gone and B.last_crawled is null limit 1024",
+  "query": "select mac from wifi_todo order by cell limit 4096",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "9ed2d66f1c812c9ca832c256263d6088c026331f3ed973c410cf952d2db55321"
+  "hash": "5e36ef6f88402fe331b6324cbd4ad12153ee1c39ba1b86a305e2013a8f876393"
 }
