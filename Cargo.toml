@@ -11,13 +11,10 @@ h3o = { version = "0.6.4" }
 clap = { version = "4.5.9", features = ["derive"] }
 tokio = { version = "1.38.0", features = ["macros", "rt-multi-thread"] }
 futures = "0.3.30"
-rusqlite = { version = "0.31.0", features = ["bundled"] }
 tryhard = "0.5.1"
 serde = { version = "1.0.204", features = ["derive"] }
-zstd = "0.13.2"
 env_logger = "0.11.5"
 log = "0.4.22"
-
 sqlx = { version = "0.8.0", features = ["postgres", "runtime-tokio", "macros", "mac_address"] }
 dotenvy = "0.15.7"
 mac6 = "1.1.0"
