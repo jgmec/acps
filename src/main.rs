@@ -13,7 +13,7 @@ use h3o::CellIndex;
 use indicatif::ProgressBar;
 use mac6::Mac;
 use reqwest::Client;
-use sqlx::{query, query_file, query_scalar, PgPool};
+use sqlx::{query, query_scalar, PgPool};
 
 mod fetch;
 use crate::fetch::{fetch, Location};
@@ -60,23 +60,38 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn update_todo(pool: &PgPool) -> Result<()> {
+async fn update_todo(pool: &PgPool, last_part: &mut i64) -> Result<()> {
     let mut tx = pool.begin().await?;
-    for cell in query_scalar!("select cell from cell where last_crawled is null")
+
+    let cells = query_scalar!(
+        "select cell from cell where last_crawled is null and part = $1",
+        *last_part
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let cells = if cells.len() == 0 {
+        *last_part = query_scalar!("select part from cell where last_crawled is null limit 1")
+            .fetch_one(&mut *tx)
+            .await?;
+        query_scalar!(
+            "select cell from cell where last_crawled is null and part = $1",
+            *last_part
+        )
         .fetch_all(&mut *tx)
         .await?
-    {
-        let cell_ = CellIndex::try_from(cell as u64)?;
-        let part: u64 = cell_.parent(h3o::Resolution::Three).unwrap().into();
+    } else {
+        cells
+    };
 
+    for cell in cells {
         let mac = query_scalar!(
             "select mac from wifi where part = $1 and cell = $2 order by random() limit 1",
-            part as i64,
+            *last_part,
             cell
         )
         .fetch_one(&mut *tx)
         .await?;
-        query!("insert into wifi_todo (mac) values ($1)", mac)
+        query!("insert into todo (mac, cell) values ($1, $2)", mac, cell)
             .execute(&mut *tx)
             .await?;
     }
@@ -87,13 +102,15 @@ async fn update_todo(pool: &PgPool) -> Result<()> {
 
 async fn explore(pool: PgPool) -> Result<()> {
     let client = Client::new();
+    let mut last_part = 0;
+
     loop {
-        let mut todo = query_scalar!("select mac from wifi_todo limit 4096")
+        let mut todo = query_scalar!("select mac from todo limit 4096")
             .fetch_all(&pool)
             .await?;
         if todo.is_empty() {
-            update_todo(&pool).await?;
-            todo = query_scalar!("select mac from wifi_todo limit 4096")
+            update_todo(&pool, &mut last_part).await?;
+            todo = query_scalar!("select mac from todo limit 4096")
                 .fetch_all(&pool)
                 .await?;
         }
@@ -110,7 +127,11 @@ async fn explore(pool: PgPool) -> Result<()> {
             requests.push(fetch(client.clone(), mac.to_string()));
         }
 
-        info!("making {} requests", requests.len());
+        info!(
+            "making {} requests for part {:012x}",
+            requests.len(),
+            last_part
+        );
         let mut requests = stream::iter(requests).buffer_unordered(256);
         let mut locs = BTreeMap::new();
         while let Some(response) = requests.try_next().await? {
@@ -154,7 +175,7 @@ async fn explore(pool: PgPool) -> Result<()> {
             }
             pb.inc(1);
 
-            query!("delete from wifi_todo where mac = $1", mac)
+            query!("delete from todo where mac = $1", mac)
                 .execute(&mut *tx)
                 .await?;
         }
@@ -162,7 +183,8 @@ async fn explore(pool: PgPool) -> Result<()> {
 
         for cell in seen_cells {
             query!(
-                "insert into cell (cell) values ($1) on conflict (cell) do nothing",
+                "insert into cell (part, cell) values ($1, $2) on conflict (part, cell) do nothing",
+                part(cell),
                 cell
             )
             .execute(&mut *tx)
@@ -170,7 +192,8 @@ async fn explore(pool: PgPool) -> Result<()> {
         }
         for cell in crawled_cells {
             query!(
-                "update cell set last_crawled = current_timestamp where cell = $1",
+                "update cell set last_crawled = current_timestamp where part = $1 and cell = $2",
+                part(cell),
                 cell
             )
             .execute(&mut *tx)
@@ -181,4 +204,10 @@ async fn explore(pool: PgPool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn part(cell: i64) -> i64 {
+    let cell = CellIndex::try_from(cell as u64).unwrap();
+    let part: u64 = cell.parent(h3o::Resolution::Three).unwrap().into();
+    part as i64
 }

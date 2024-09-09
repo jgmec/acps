@@ -29,14 +29,18 @@ create table wifi_15 partition of wifi for values with (modulus 16, remainder 15
 create index wifi_cell on wifi (cell);
 create index wifi_gone on wifi (mac) where gone;
 
-create table wifi_todo (
-    mac macaddr primary key not null
+create table todo (
+    mac macaddr primary key not null,
+    cell bigint
 );
+create index todo_cell on todo (cell);
 
 create table cell (
-    cell bigint primary key not null,
+    part bigint not null,
+    cell bigint not null,
+    primary key (part, cell),
+
     last_crawled timestamp with time zone
 );
 
-create index cell_last_crawled on cell (last_crawled);
-create index cell_todo on cell (cell) where last_crawled is null;
+create index cell_todo on cell (part, cell) where last_crawled is null;
