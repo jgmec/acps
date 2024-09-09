@@ -9,6 +9,7 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::{stream, StreamExt, TryStreamExt};
+use h3o::CellIndex;
 use indicatif::ProgressBar;
 use mac6::Mac;
 use reqwest::Client;
@@ -59,21 +60,43 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn update_todo(pool: &PgPool) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    for cell in query_scalar!("select cell from cell where last_crawled is null")
+        .fetch_all(&mut *tx)
+        .await?
+    {
+        let cell_ = CellIndex::try_from(cell as u64)?;
+        let part: u64 = cell_.parent(h3o::Resolution::Three).unwrap().into();
+
+        let mac = query_scalar!(
+            "select mac from wifi where part = $1 and cell = $2 order by random() limit 1",
+            part as i64,
+            cell
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        query!("insert into wifi_todo (mac) values ($1)", mac)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+
+    Ok(())
+}
+
 async fn explore(pool: PgPool) -> Result<()> {
     let client = Client::new();
     loop {
-        let mut todo = query_scalar!("select mac from wifi_todo order by cell limit 4096")
+        let mut todo = query_scalar!("select mac from wifi_todo limit 4096")
             .fetch_all(&pool)
             .await?;
         if todo.is_empty() {
-            query_file!("queries/wifi_cell_todo.sql")
-                .execute(&pool)
-                .await?;
-            todo = query_scalar!("select mac from wifi_todo order by cell limit 4096")
+            update_todo(&pool).await?;
+            todo = query_scalar!("select mac from wifi_todo limit 4096")
                 .fetch_all(&pool)
                 .await?;
         }
-
         if todo.is_empty() {
             info!("nothing to do");
             break;
@@ -104,13 +127,14 @@ async fn explore(pool: PgPool) -> Result<()> {
         let mut seen_cells = BTreeSet::new();
         for (mac, loc) in locs {
             if let Some(loc) = loc {
-                let cell = loc.cell();
+                let (cell, part) = loc.cell();
                 query!(
-                    "insert into wifi_seen (
-                        mac, cell, lat, lon
+                    "insert into wifi (
+                        part, mac, cell, lat, lon
                     ) values (
-                        $1, $2, $3, $4
-                    ) on conflict (mac) do update set cell = $2, lat = $3, lon = $4",
+                        $1, $2, $3, $4, $5
+                    ) on conflict (part, mac) do update set part = $1, cell = $3, lat = $4, lon = $5",
+                    part,
                     mac,
                     cell,
                     loc.lat,
@@ -124,9 +148,9 @@ async fn explore(pool: PgPool) -> Result<()> {
                     crawled_cells.insert(cell);
                 }
             } else {
-                query!("update wifi_seen set gone = true where mac = $1", mac,)
-                    .execute(&mut *tx)
-                    .await?;
+                // query!("update wifi set gone = true where mac = $1", mac,)
+                //     .execute(&mut *tx)
+                //     .await?;
             }
             pb.inc(1);
 
@@ -138,7 +162,7 @@ async fn explore(pool: PgPool) -> Result<()> {
 
         for cell in seen_cells {
             query!(
-                "insert into wifi_cell (cell) values ($1) on conflict (cell) do nothing",
+                "insert into cell (cell) values ($1) on conflict (cell) do nothing",
                 cell
             )
             .execute(&mut *tx)
@@ -146,7 +170,7 @@ async fn explore(pool: PgPool) -> Result<()> {
         }
         for cell in crawled_cells {
             query!(
-                "update wifi_cell set last_crawled = current_timestamp where cell = $1",
+                "update cell set last_crawled = current_timestamp where cell = $1",
                 cell
             )
             .execute(&mut *tx)
