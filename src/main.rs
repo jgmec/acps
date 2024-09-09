@@ -40,11 +40,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
-    let pool = PgPool::connect(&dotenvy::var("DATABASE_URL")?).await?;
-    sqlx::migrate!().run(&pool).await?;
-
     match cli.command {
-        Command::Explore => explore(pool).await?,
+        Command::Explore => {
+            let pool = PgPool::connect(dbg!(&dotenvy::var("DATABASE_URL")?)).await?;
+            sqlx::migrate!().run(&pool).await?;
+            explore(pool).await?
+        }
         Command::Query { mac } => {
             let wifis = fetch(Client::new(), Mac::from_str(&mac).unwrap().to_string()).await?;
             if let Some((_, Some(Location { lat, lon, .. }))) = wifis.first() {
@@ -109,9 +110,11 @@ async fn explore(pool: PgPool) -> Result<()> {
     loop {
         let mut todo = Vec::new();
         if last_part == 0 {
-            query_scalar!("select mac from todo limit 4096")
-                .fetch_all(&pool)
-                .await?;
+            todo.extend(
+                query_scalar!("select mac from todo limit 4096")
+                    .fetch_all(&pool)
+                    .await?,
+            );
         }
         if todo.is_empty() {
             todo.extend(find_todo(&pool, &mut last_part).await?);
