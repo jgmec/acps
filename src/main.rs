@@ -12,6 +12,7 @@ use futures::{stream, StreamExt, TryStreamExt};
 use h3o::CellIndex;
 use indicatif::ProgressBar;
 use mac6::Mac;
+use mac_address::MacAddress;
 use reqwest::Client;
 use sqlx::{query, query_scalar, PgPool};
 
@@ -60,7 +61,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn update_todo(pool: &PgPool, last_part: &mut i64) -> Result<()> {
+async fn find_todo(pool: &PgPool, last_part: &mut i64) -> Result<BTreeSet<MacAddress>> {
     let mut tx = pool.begin().await?;
 
     let cells = query_scalar!(
@@ -70,9 +71,11 @@ async fn update_todo(pool: &PgPool, last_part: &mut i64) -> Result<()> {
     .fetch_all(&mut *tx)
     .await?;
     let cells = if cells.len() == 0 {
-        *last_part = query_scalar!("select part from cell where last_crawled is null limit 1")
-            .fetch_one(&mut *tx)
-            .await?;
+        // find a different part to crawl
+        *last_part =
+            query_scalar!("select part from cell where last_crawled is null order by part limit 1")
+                .fetch_one(&mut *tx)
+                .await?;
         query_scalar!(
             "select cell from cell where last_crawled is null and part = $1",
             *last_part
@@ -83,6 +86,7 @@ async fn update_todo(pool: &PgPool, last_part: &mut i64) -> Result<()> {
         cells
     };
 
+    let mut todo = BTreeSet::new();
     for cell in cells {
         let mac = query_scalar!(
             "select mac from wifi where part = $1 and cell = $2 order by random() limit 1",
@@ -91,13 +95,11 @@ async fn update_todo(pool: &PgPool, last_part: &mut i64) -> Result<()> {
         )
         .fetch_one(&mut *tx)
         .await?;
-        query!("insert into todo (mac, cell) values ($1, $2)", mac, cell)
-            .execute(&mut *tx)
-            .await?;
+        todo.insert(mac);
     }
     tx.commit().await?;
 
-    Ok(())
+    Ok(todo)
 }
 
 async fn explore(pool: PgPool) -> Result<()> {
@@ -105,14 +107,14 @@ async fn explore(pool: PgPool) -> Result<()> {
     let mut last_part = 0;
 
     loop {
-        let mut todo = query_scalar!("select mac from todo limit 4096")
-            .fetch_all(&pool)
-            .await?;
-        if todo.is_empty() {
-            update_todo(&pool, &mut last_part).await?;
-            todo = query_scalar!("select mac from todo limit 4096")
+        let mut todo = Vec::new();
+        if last_part == 0 {
+            query_scalar!("select mac from todo limit 4096")
                 .fetch_all(&pool)
                 .await?;
+        }
+        if todo.is_empty() {
+            todo.extend(find_todo(&pool, &mut last_part).await?);
         }
         if todo.is_empty() {
             info!("nothing to do");
@@ -175,9 +177,11 @@ async fn explore(pool: PgPool) -> Result<()> {
             }
             pb.inc(1);
 
-            query!("delete from todo where mac = $1", mac)
-                .execute(&mut *tx)
-                .await?;
+            if last_part == 0 {
+                query!("delete from todo where mac = $1", mac)
+                    .execute(&mut *tx)
+                    .await?;
+            }
         }
         pb.finish_and_clear();
 
