@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select part from cell where last_crawled is null order by part limit 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "part",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d2d792d6c367e665dd75e773c8bacf266d2c8131c935a016defa21d23041f556"
+}

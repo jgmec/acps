@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select mac from wifi_todo order by cell limit 4096",
+  "query": "select mac from todo limit 4096",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "5e36ef6f88402fe331b6324cbd4ad12153ee1c39ba1b86a305e2013a8f876393"
+  "hash": "05a1e239525242dad4204e84e1e61fc0765f769f0a61c0659f63854f3155933c"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "delete from wifi_todo where mac = $1",
+  "query": "delete from todo where mac = $1",
   "describe": {
     "columns": [],
     "parameters": {
@@ -10,5 +10,5 @@
     },
     "nullable": []
   },
-  "hash": "170604be3c19eeec6bef796e1809e8b4b594ffa818a139c40d5047fe3cbd8fc7"
+  "hash": "783b9ef74c6f9519734726c56637ae12fbc9939ff4f135cd00109696b907b2f3"
 }
