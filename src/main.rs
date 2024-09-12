@@ -124,6 +124,7 @@ async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
             }
         };
         if todo.is_empty() {
+            tx.commit().await?;
             return Ok(part);
         }
 
