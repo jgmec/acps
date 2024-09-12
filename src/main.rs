@@ -22,6 +22,9 @@ pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/apple.rs"));
 }
 
+const CONCURRENT_PARTS: usize = 4;
+const CONCURRENT_CELLS_PER_PART: usize = 512;
+
 #[derive(Parser)]
 struct Cli {
     #[clap(subcommand)]
@@ -43,8 +46,7 @@ async fn main() -> Result<()> {
         Command::Explore => {
             let client = Client::new();
             let pool = PgPoolOptions::new()
-                .max_connections(100)
-                .min_connections(8)
+                .max_connections(64)
                 .connect(dbg!(&dotenvy::var("DATABASE_URL")?))
                 .await?;
             sqlx::migrate!().run(&pool).await?;
@@ -54,8 +56,8 @@ async fn main() -> Result<()> {
 
             tasks.spawn(explore(client.clone(), pool.clone(), 0));
             loop {
-                if tasks.len() < 16 {
-                    for part in query_scalar!("select distinct part from cell where last_crawled is null order by part limit 16").fetch_all(&pool).await? {
+                if tasks.len() < CONCURRENT_PARTS {
+                    for part in query_scalar!("select distinct part from cell where last_crawled is null order by part limit $1", CONCURRENT_PARTS as i64).fetch_all(&pool).await? {
                         if parts_exploring.insert(part) {
                             info!("starting to explore {part:012x}");
                             tasks.spawn(explore(client.clone(),pool.clone(), part));
@@ -100,8 +102,9 @@ async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
             );
         } else {
             for cell in query_scalar!(
-                "select cell from cell where last_crawled is null and part = $1 limit 64",
-                part
+                "select cell from cell where last_crawled is null and part = $1 limit $2",
+                part,
+                CONCURRENT_CELLS_PER_PART as i64
             )
             .fetch_all(&mut *tx)
             .await?
@@ -117,7 +120,7 @@ async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
                     todo.insert(mac);
                 } else {
                     info!("deleting cell {cell:012x}");
-                    query!("delete from cell where cell = $1", cell)
+                    query!("delete from cell where part = $1 and cell = $2", part, cell)
                         .execute(&mut *tx)
                         .await?;
                 }
@@ -143,8 +146,6 @@ async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
         }
         info!("received {} macs for part {part:012x}", locs.len());
 
-        let mut tx = pool.begin().await?;
-
         let mut crawled_cells = BTreeSet::new();
         let mut seen_cells = BTreeSet::new();
         for (mac, loc) in locs {
@@ -155,7 +156,7 @@ async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
                         part, mac, cell, lat, lon
                     ) values (
                         $1, $2, $3, $4, $5
-                    ) on conflict (part, mac) do update set part = $1, cell = $3, lat = $4, lon = $5",
+                    ) on conflict (part, mac) do update set cell = $3, lat = $4, lon = $5",
                     part,
                     mac,
                     cell,
@@ -170,9 +171,13 @@ async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
                     crawled_cells.insert(cell);
                 }
             } else {
-                query!("update wifi set gone = true where mac = $1", mac,)
-                    .execute(&mut *tx)
-                    .await?;
+                query!(
+                    "update wifi set gone = true where part = $1 and mac = $2",
+                    part,
+                    mac,
+                )
+                .execute(&mut *tx)
+                .await?;
             }
 
             if part == 0 {
