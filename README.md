@@ -23,6 +23,8 @@ Extracts a _stupid amount_ of data from Apple's WiFi Positioning System. Built t
 
 ## Usage
 
+### `query`
+
 You can query the location of a single MAC using `wtfps query`:
 
 ```
@@ -30,6 +32,8 @@ $ wtfps query 90:CD:B6:11:50:D9
 https://www.openstreetmap.org/search?query=53.220985410000004%2F-4.20290374#map=12/53.220985410000004/-4.20290374
 [src/main.rs:55:17] wifis.len() = 400
 ```
+
+### `explore`
 
 In order to explore Apple's DB, you'll need to setup Postgres. wtfps requires some initial MACs to seed crawling:
 
@@ -43,4 +47,17 @@ wtfps=# \copy todo (mac) from 'seeds.txt';
 aabbccddeeff
 000000000001
 000000000002
+```
+
+You can monitor progress by querying the DB:
+
+```sql
+-- todo: user-controlled queue
+select count(*) from todo;
+
+-- cell: areas crawled, exploration queue
+select count(*) from cell where last_crawled is null;
+
+-- wifi: scraped wifi networks
+select count(*) from wifi;
 ```
