@@ -35,7 +35,9 @@ https://www.openstreetmap.org/search?query=53.220985410000004%2F-4.20290374#map=
 
 ### `explore`
 
-In order to explore Apple's DB, you'll need to setup Postgres. wtfps requires some initial MACs to seed crawling:
+In order to explore Apple's DB, you'll need to setup Postgres and providing wtfps with connection information in the `DATABASE_URL` environment variable. wtfps will automatically create needed tables on first run of `wtfps explore`.
+
+wtfps requires some initial MACs to seed crawling:
 
 ```
 wtfps=# insert into todo (mac) values ('AA:BB:CC:DD:EE:FF');
