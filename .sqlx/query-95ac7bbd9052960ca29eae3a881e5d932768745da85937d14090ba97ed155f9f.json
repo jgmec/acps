@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select cell from cell where last_crawled is null and part = $1 limit 64",
+  "query": "select cell from cell where last_crawled is null and part = $1 limit $2",
   "describe": {
     "columns": [
       {
@@ -11,6 +11,7 @@
     ],
     "parameters": {
       "Left": [
+        "Int8",
         "Int8"
       ]
     },
@@ -18,5 +19,5 @@
       false
     ]
   },
-  "hash": "69da986984028a427d4566798a8d6e4cd5fc4cf6dc63eb3855aaf1eb1d82afb0"
+  "hash": "95ac7bbd9052960ca29eae3a881e5d932768745da85937d14090ba97ed155f9f"
 }

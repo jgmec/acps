@@ -1,14 +1,15 @@
 {
   "db_name": "PostgreSQL",
-  "query": "delete from cell where cell = $1",
+  "query": "delete from cell where part = $1 and cell = $2",
   "describe": {
     "columns": [],
     "parameters": {
       "Left": [
+        "Int8",
         "Int8"
       ]
     },
     "nullable": []
   },
-  "hash": "368ed9bca4695437239243090b48567740e450076a07f52fadfba6c6eea813bb"
+  "hash": "42ea9bfa06ac1a0714344e6b1fcdba80dab00b2f0aefef1ac8251787718379c6"
 }

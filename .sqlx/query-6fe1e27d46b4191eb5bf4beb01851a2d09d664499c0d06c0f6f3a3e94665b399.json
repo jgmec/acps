@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select distinct part from cell where last_crawled is null order by part limit 16",
+  "query": "select distinct part from cell where last_crawled is null order by part limit $1",
   "describe": {
     "columns": [
       {
@@ -10,11 +10,13 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Int8"
+      ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "8b9e2137c771aef800ad94924d0cc88fd67c7c6d6d31489efe3184d07121604d"
+  "hash": "6fe1e27d46b4191eb5bf4beb01851a2d09d664499c0d06c0f6f3a3e94665b399"
 }
