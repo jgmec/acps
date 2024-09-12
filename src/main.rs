@@ -10,11 +10,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::{stream, StreamExt, TryStreamExt};
 use h3o::CellIndex;
-use indicatif::ProgressBar;
 use mac6::Mac;
-use mac_address::MacAddress;
 use reqwest::Client;
-use sqlx::{query, query_scalar, PgPool};
+use sqlx::{postgres::PgPoolOptions, query, query_scalar, PgPool};
+use tokio::task::JoinSet;
 
 mod fetch;
 use crate::fetch::{fetch, Location};
@@ -42,9 +41,36 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Explore => {
-            let pool = PgPool::connect(dbg!(&dotenvy::var("DATABASE_URL")?)).await?;
+            let client = Client::new();
+            let pool = PgPoolOptions::new()
+                .max_connections(100)
+                .min_connections(8)
+                .connect(dbg!(&dotenvy::var("DATABASE_URL")?))
+                .await?;
             sqlx::migrate!().run(&pool).await?;
-            explore(pool).await?
+
+            let mut parts_exploring = BTreeSet::new();
+            let mut tasks = JoinSet::new();
+
+            tasks.spawn(explore(client.clone(), pool.clone(), 0));
+            loop {
+                if tasks.len() < 16 {
+                    for part in query_scalar!("select distinct part from cell where last_crawled is null order by part limit 16").fetch_all(&pool).await? {
+                        if parts_exploring.insert(part) {
+                            info!("starting to explore {part:012x}");
+                            tasks.spawn(explore(client.clone(),pool.clone(), part));
+                        }
+                    }
+                }
+
+                if let Some(task) = tasks.join_next().await {
+                    let part = task??;
+                    info!("finished exploring {part:012x}");
+                    parts_exploring.remove(&part);
+                } else {
+                    break;
+                }
+            }
         }
         Command::Query { mac } => {
             let wifis = fetch(Client::new(), Mac::from_str(&mac).unwrap().to_string()).await?;
@@ -62,76 +88,44 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn find_todo(pool: &PgPool, last_part: &mut i64) -> Result<BTreeSet<MacAddress>> {
-    let mut tx = pool.begin().await?;
-
-    let cells = query_scalar!(
-        "select cell from cell where last_crawled is null and part = $1",
-        *last_part
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    let cells = if cells.len() == 0 {
-        // find a different part to crawl
-        *last_part =
-            query_scalar!("select part from cell where last_crawled is null order by part limit 1")
-                .fetch_one(&mut *tx)
-                .await?;
-        query_scalar!(
-            "select cell from cell where last_crawled is null and part = $1",
-            *last_part
-        )
-        .fetch_all(&mut *tx)
-        .await?
-    } else {
-        cells
-    };
-
-    let mut todo = BTreeSet::new();
-    for cell in cells {
-        let mac = query_scalar!(
-            "select mac from wifi where part = $1 and cell = $2 order by random() limit 1",
-            *last_part,
-            cell
-        )
-        .fetch_optional(&mut *tx)
-        .await?;
-        if let Some(mac) = mac {
-            todo.insert(mac);
-        } else {
-            info!("deleting cell {cell:012x}");
-            query!("delete from cell where cell = $1", cell)
-                .execute(&mut *tx)
-                .await?;
-        }
-    }
-    tx.commit().await?;
-
-    Ok(todo)
-}
-
-async fn explore(pool: PgPool) -> Result<()> {
-    let client = Client::new();
-    let mut last_part = 0;
-
+async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
     loop {
-        let mut todo = Vec::new();
-        if last_part == 0 {
+        let mut tx = pool.begin().await?;
+        let mut todo = BTreeSet::new();
+        if part == 0 {
             todo.extend(
                 query_scalar!("select mac from todo limit 4096")
                     .fetch_all(&pool)
                     .await?,
             );
-        }
+        } else {
+            for cell in query_scalar!(
+                "select cell from cell where last_crawled is null and part = $1 limit 64",
+                part
+            )
+            .fetch_all(&mut *tx)
+            .await?
+            {
+                let mac = query_scalar!(
+                    "select mac from wifi where part = $1 and cell = $2 order by random() limit 1",
+                    part,
+                    cell
+                )
+                .fetch_optional(&mut *tx)
+                .await?;
+                if let Some(mac) = mac {
+                    todo.insert(mac);
+                } else {
+                    info!("deleting cell {cell:012x}");
+                    query!("delete from cell where cell = $1", cell)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+        };
         if todo.is_empty() {
-            todo.extend(find_todo(&pool, &mut last_part).await?);
+            return Ok(part);
         }
-        if todo.is_empty() {
-            info!("nothing to do");
-            break;
-        }
-
-        let todo = BTreeSet::from_iter(todo);
 
         // queue requests
         let mut requests = Vec::new();
@@ -139,11 +133,6 @@ async fn explore(pool: PgPool) -> Result<()> {
             requests.push(fetch(client.clone(), mac.to_string()));
         }
 
-        info!(
-            "making {} requests for part {:012x}",
-            requests.len(),
-            last_part
-        );
         let mut requests = stream::iter(requests).buffer_unordered(256);
         let mut locs = BTreeMap::new();
         while let Some(response) = requests.try_next().await? {
@@ -151,10 +140,9 @@ async fn explore(pool: PgPool) -> Result<()> {
                 locs.insert(mac, loc);
             }
         }
-        info!("received {} macs", locs.len());
+        info!("received {} macs for part {part:012x}", locs.len());
 
         let mut tx = pool.begin().await?;
-        let pb = ProgressBar::new(locs.len() as u64);
 
         let mut crawled_cells = BTreeSet::new();
         let mut seen_cells = BTreeSet::new();
@@ -185,20 +173,18 @@ async fn explore(pool: PgPool) -> Result<()> {
                 //     .execute(&mut *tx)
                 //     .await?;
             }
-            pb.inc(1);
 
-            if last_part == 0 {
+            if part == 0 {
                 query!("delete from todo where mac = $1", mac)
                     .execute(&mut *tx)
                     .await?;
             }
         }
-        pb.finish_and_clear();
 
         for cell in seen_cells {
             query!(
                 "insert into cell (part, cell) values ($1, $2) on conflict (part, cell) do nothing",
-                part(cell),
+                cell_part(cell),
                 cell
             )
             .execute(&mut *tx)
@@ -207,7 +193,7 @@ async fn explore(pool: PgPool) -> Result<()> {
         for cell in crawled_cells {
             query!(
                 "update cell set last_crawled = current_timestamp where part = $1 and cell = $2",
-                part(cell),
+                cell_part(cell),
                 cell
             )
             .execute(&mut *tx)
@@ -216,11 +202,9 @@ async fn explore(pool: PgPool) -> Result<()> {
 
         tx.commit().await?;
     }
-
-    Ok(())
 }
 
-fn part(cell: i64) -> i64 {
+fn cell_part(cell: i64) -> i64 {
     let cell = CellIndex::try_from(cell as u64).unwrap();
     let part: u64 = cell.parent(h3o::Resolution::Three).unwrap().into();
     part as i64
