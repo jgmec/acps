@@ -43,7 +43,7 @@ impl Location {
                 .unwrap()
                 .to_cell(h3o::Resolution::Ten),
         );
-        let cell3: u64 = cell.parent(h3o::Resolution::Three).unwrap().into();
+        let cell3: u64 = cell.parent(h3o::Resolution::Six).unwrap().into();
         let cell: u64 = cell.into();
         (cell as i64, cell3 as i64)
     }

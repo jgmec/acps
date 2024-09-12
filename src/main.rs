@@ -22,8 +22,8 @@ pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/apple.rs"));
 }
 
-const CONCURRENT_PARTS: usize = 4;
-const CONCURRENT_CELLS_PER_PART: usize = 512;
+const CONCURRENT_PARTS: usize = 32;
+const CONCURRENT_CELLS_PER_PART: usize = 256;
 
 #[derive(Parser)]
 struct Cli {
@@ -96,7 +96,7 @@ async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
         let mut todo = BTreeSet::new();
         if part == 0 {
             todo.extend(
-                query_scalar!("select mac from todo limit 4096")
+                query_scalar!("select mac from todo limit 256")
                     .fetch_all(&pool)
                     .await?,
             );
@@ -212,6 +212,6 @@ async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
 
 fn cell_part(cell: i64) -> i64 {
     let cell = CellIndex::try_from(cell as u64).unwrap();
-    let part: u64 = cell.parent(h3o::Resolution::Three).unwrap().into();
+    let part: u64 = cell.parent(h3o::Resolution::Six).unwrap().into();
     part as i64
 }
