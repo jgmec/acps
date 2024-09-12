@@ -94,9 +94,16 @@ async fn find_todo(pool: &PgPool, last_part: &mut i64) -> Result<BTreeSet<MacAdd
             *last_part,
             cell
         )
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-        todo.insert(mac);
+        if let Some(mac) = mac {
+            todo.insert(mac);
+        } else {
+            info!("deleting cell {cell:012x}");
+            query!("delete from cell where cell = $1", cell)
+                .execute(&mut *tx)
+                .await?;
+        }
     }
     tx.commit().await?;
 
