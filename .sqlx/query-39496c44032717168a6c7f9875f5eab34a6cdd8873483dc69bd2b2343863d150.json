@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select mac from wifi where part = $1 and cell = $2 order by random() limit 1",
+  "query": "select mac from wifi where part = $1 and cell = $2 and not gone order by random() limit 1",
   "describe": {
     "columns": [
       {
@@ -19,5 +19,5 @@
       false
     ]
   },
-  "hash": "516fc11402c01309042352bc0ca1d49db87078db676f6aa728e0b7a3bb702f2c"
+  "hash": "39496c44032717168a6c7f9875f5eab34a6cdd8873483dc69bd2b2343863d150"
 }

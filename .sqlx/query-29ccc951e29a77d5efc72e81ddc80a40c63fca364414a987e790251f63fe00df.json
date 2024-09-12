@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update wifi set gone = true where mac = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Macaddr"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "29ccc951e29a77d5efc72e81ddc80a40c63fca364414a987e790251f63fe00df"
+}

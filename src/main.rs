@@ -107,7 +107,7 @@ async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
             .await?
             {
                 let mac = query_scalar!(
-                    "select mac from wifi where part = $1 and cell = $2 order by random() limit 1",
+                    "select mac from wifi where part = $1 and cell = $2 and not gone order by random() limit 1",
                     part,
                     cell
                 )
@@ -170,9 +170,9 @@ async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
                     crawled_cells.insert(cell);
                 }
             } else {
-                // query!("update wifi set gone = true where mac = $1", mac,)
-                //     .execute(&mut *tx)
-                //     .await?;
+                query!("update wifi set gone = true where mac = $1", mac,)
+                    .execute(&mut *tx)
+                    .await?;
             }
 
             if part == 0 {
