@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
                     for part in query_scalar!("select distinct part from cell where last_crawled is null order by part limit $1", CONCURRENT_PARTS as i64).fetch_all(&pool).await? {
                         if tasks.len() < CONCURRENT_PARTS {
                             if parts_exploring.insert(part) {
-                                    tasks.spawn(explore(pb.clone(), client.clone(),pool.clone(), part));
+                                tasks.spawn(explore(pb.clone(), client.clone(),pool.clone(), part));
                             }
                         } else {
                             break;
@@ -110,7 +110,7 @@ async fn explore(pb: ProgressBar, client: Client, pool: PgPool, part: i64) -> Re
             );
         } else {
             for cell in query_scalar!(
-                "select cell from cell where last_crawled is null and part = $1 limit $2",
+                "select cell from cell where last_crawled is null and part = $1 limit $2 for update",
                 part,
                 CONCURRENT_CELLS_PER_PART as i64
             )
