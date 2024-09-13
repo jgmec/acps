@@ -10,6 +10,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::{stream, StreamExt, TryStreamExt};
 use h3o::CellIndex;
+use indicatif::{ProgressBar, ProgressDrawTarget};
 use mac6::Mac;
 use reqwest::Client;
 use sqlx::{postgres::PgPoolOptions, query, query_scalar, PgPool};
@@ -22,8 +23,8 @@ pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/apple.rs"));
 }
 
-const CONCURRENT_PARTS: usize = 32;
-const CONCURRENT_CELLS_PER_PART: usize = 256;
+const CONCURRENT_PARTS: usize = 16;
+const CONCURRENT_CELLS_PER_PART: usize = 8;
 
 #[derive(Parser)]
 struct Cli {
@@ -46,33 +47,40 @@ async fn main() -> Result<()> {
         Command::Explore => {
             let client = Client::new();
             let pool = PgPoolOptions::new()
-                .max_connections(64)
+                .max_connections((CONCURRENT_PARTS * 2) as _)
                 .connect(dbg!(&dotenvy::var("DATABASE_URL")?))
                 .await?;
             sqlx::migrate!().run(&pool).await?;
 
             let mut parts_exploring = BTreeSet::new();
             let mut tasks = JoinSet::new();
+            let pb = ProgressBar::new_spinner();
+            pb.set_draw_target(ProgressDrawTarget::hidden());
 
-            tasks.spawn(explore(client.clone(), pool.clone(), 0));
+            tasks.spawn(explore(pb.clone(), client.clone(), pool.clone(), 0));
             loop {
                 if tasks.len() < CONCURRENT_PARTS {
                     for part in query_scalar!("select distinct part from cell where last_crawled is null order by part limit $1", CONCURRENT_PARTS as i64).fetch_all(&pool).await? {
-                        if parts_exploring.insert(part) {
-                            info!("starting to explore {part:012x}");
-                            tasks.spawn(explore(client.clone(),pool.clone(), part));
+                        if tasks.len() < CONCURRENT_PARTS {
+                            if parts_exploring.insert(part) {
+                                    tasks.spawn(explore(pb.clone(), client.clone(),pool.clone(), part));
+                            }
+                        } else {
+                            break;
                         }
                     }
                 }
 
+                info!("exploring {} parts at {:.0}/s", tasks.len(), pb.per_sec());
+
                 if let Some(task) = tasks.join_next().await {
                     let part = task??;
-                    info!("finished exploring {part:012x}");
                     parts_exploring.remove(&part);
                 } else {
                     break;
                 }
             }
+            pb.finish_and_clear();
         }
         Command::Query { mac } => {
             let wifis = fetch(Client::new(), Mac::from_str(&mac).unwrap().to_string()).await?;
@@ -90,13 +98,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
+async fn explore(pb: ProgressBar, client: Client, pool: PgPool, part: i64) -> Result<i64> {
     loop {
         let mut tx = pool.begin().await?;
         let mut todo = BTreeSet::new();
         if part == 0 {
             todo.extend(
-                query_scalar!("select mac from todo limit 256")
+                query_scalar!("select mac from todo limit 64")
                     .fetch_all(&pool)
                     .await?,
             );
@@ -144,7 +152,7 @@ async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
                 locs.insert(mac, loc);
             }
         }
-        info!("received {} macs for part {part:012x}", locs.len());
+        // info!("received {} macs for part {part:012x}", locs.len());
 
         let mut crawled_cells = BTreeSet::new();
         let mut seen_cells = BTreeSet::new();
@@ -179,6 +187,8 @@ async fn explore(client: Client, pool: PgPool, part: i64) -> Result<i64> {
                 .execute(&mut *tx)
                 .await?;
             }
+
+            pb.inc(1);
 
             if part == 0 {
                 query!("delete from todo where mac = $1", mac)
