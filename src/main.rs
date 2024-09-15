@@ -23,7 +23,7 @@ pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/apple.rs"));
 }
 
-const CONCURRENT_PARTS: usize = 16;
+const CONCURRENT_PARTS: usize = 8;
 const CONCURRENT_CELLS_PER_PART: usize = 8;
 
 #[derive(Parser)]
@@ -57,17 +57,23 @@ async fn main() -> Result<()> {
             let pb = ProgressBar::new_spinner();
             pb.set_draw_target(ProgressDrawTarget::hidden());
 
-            tasks.spawn(explore(pb.clone(), client.clone(), pool.clone(), 0));
+            let mut to_spawn = vec![0];
             loop {
-                if tasks.len() < CONCURRENT_PARTS {
+                if (to_spawn.len() + tasks.len()) < CONCURRENT_PARTS {
                     for part in query_scalar!("select distinct part from cell where last_crawled is null order by part limit $1", CONCURRENT_PARTS as i64).fetch_all(&pool).await? {
-                        if tasks.len() < CONCURRENT_PARTS {
-                            if parts_exploring.insert(part) {
-                                tasks.spawn(explore(pb.clone(), client.clone(),pool.clone(), part));
+                        if (to_spawn.len() + tasks.len()) < CONCURRENT_PARTS {
+                            if !parts_exploring.contains(&part) {
+                                to_spawn.push(part);
                             }
                         } else {
                             break;
                         }
+                    }
+                }
+
+                for part in to_spawn.drain(..) {
+                    if parts_exploring.insert(part) {
+                        tasks.spawn(explore(pb.clone(), client.clone(),pool.clone(), part));
                     }
                 }
 
@@ -83,6 +89,7 @@ async fn main() -> Result<()> {
                                 if e.message() == "deadlock detected" =>
                             {
                                 error!("part deadlocked");
+                                to_spawn.push(part);
                             }
                             _ => bail!(e),
                         },
