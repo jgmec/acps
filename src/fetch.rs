@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{error::Error, time::Duration};
 
 use anyhow::{bail, Result};
 use h3o::{CellIndex, LatLng};
@@ -90,7 +90,7 @@ pub async fn request(client: Client, x: AppleWLoc) -> Result<AppleWLoc> {
         async {
             let res = req.send().await.and_then(|x| x.error_for_status());
             if let Err(e) = &res {
-                warn!("{e}")
+                warn!("{:?}", e.source().unwrap_or(e))
             }
             res
         }

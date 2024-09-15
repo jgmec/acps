@@ -6,7 +6,7 @@ use std::{
     str::FromStr,
 };
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use futures::{stream, StreamExt, TryStreamExt};
 use h3o::CellIndex;
@@ -74,8 +74,20 @@ async fn main() -> Result<()> {
                 info!("exploring {} parts at {:.0}/s", tasks.len(), pb.per_sec());
 
                 if let Some(task) = tasks.join_next().await {
-                    let part = task??;
-                    parts_exploring.remove(&part);
+                    let result = task?;
+                    match result {
+                        Ok(part) => {
+                            parts_exploring.remove(&part);
+                        }
+                        Err(e) => match e.downcast_ref::<sqlx::Error>() {
+                            Some(sqlx::Error::Database(e))
+                                if e.message() == "deadlock detected" =>
+                            {
+                                error!("part deadlocked");
+                            }
+                            _ => bail!(e),
+                        },
+                    }
                 } else {
                     break;
                 }
@@ -152,7 +164,14 @@ async fn explore(pb: ProgressBar, client: Client, pool: PgPool, part: i64) -> Re
                 locs.insert(mac, loc);
             }
         }
-        // info!("received {} macs for part {part:012x}", locs.len());
+
+        if part == 0 {
+            info!(
+                "todo batch returned {} macs, {} not found",
+                locs.values().filter(|x| x.is_some()).count(),
+                locs.values().filter(|x| x.is_none()).count()
+            );
+        }
 
         let mut crawled_cells = BTreeSet::new();
         let mut seen_cells = BTreeSet::new();
@@ -190,11 +209,11 @@ async fn explore(pb: ProgressBar, client: Client, pool: PgPool, part: i64) -> Re
 
             pb.inc(1);
 
-            if part == 0 {
-                query!("delete from todo where mac = $1", mac)
-                    .execute(&mut *tx)
-                    .await?;
-            }
+            // if part == 0 {
+            query!("delete from todo where mac = $1", mac)
+                .execute(&mut *tx)
+                .await?;
+            // }
         }
 
         for cell in seen_cells {
