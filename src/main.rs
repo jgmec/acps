@@ -74,11 +74,10 @@ async fn main() -> Result<()> {
                 info!("exploring {} parts at {:.0}/s", tasks.len(), pb.per_sec());
 
                 if let Some(task) = tasks.join_next().await {
-                    let result = task?;
+                    let (part, result) = task?;
+                    parts_exploring.remove(&part);
                     match result {
-                        Ok(part) => {
-                            parts_exploring.remove(&part);
-                        }
+                        Ok(()) => (),
                         Err(e) => match e.downcast_ref::<sqlx::Error>() {
                             Some(sqlx::Error::Database(e))
                                 if e.message() == "deadlock detected" =>
@@ -110,18 +109,20 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn explore(pb: ProgressBar, client: Client, pool: PgPool, part: i64) -> Result<i64> {
-    loop {
-        let mut tx = pool.begin().await?;
-        let mut todo = BTreeSet::new();
-        if part == 0 {
-            todo.extend(
-                query_scalar!("select mac from todo limit 64")
-                    .fetch_all(&pool)
-                    .await?,
-            );
-        } else {
-            for cell in query_scalar!(
+async fn explore(pb: ProgressBar, client: Client, pool: PgPool, part: i64) -> (i64, Result<()>) {
+    (part, 
+        async {
+            loop {
+                let mut tx = pool.begin().await?;
+                let mut todo = BTreeSet::new();
+                if part == 0 {
+                    todo.extend(
+                        query_scalar!("select mac from todo limit 64")
+                            .fetch_all(&pool)
+                            .await?,
+                    );
+                } else {
+                    for cell in query_scalar!(
                 "select cell from cell where last_crawled is null and part = $1 limit $2 for update",
                 part,
                 CONCURRENT_CELLS_PER_PART as i64
@@ -145,98 +146,100 @@ async fn explore(pb: ProgressBar, client: Client, pool: PgPool, part: i64) -> Re
                         .await?;
                 }
             }
-        };
-        if todo.is_empty() {
-            tx.commit().await?;
-            return Ok(part);
-        }
+                };
+                if todo.is_empty() {
+                    tx.commit().await?;
+                    return Ok(());
+                }
 
-        // queue requests
-        let mut requests = Vec::new();
-        for mac in &todo {
-            requests.push(fetch(client.clone(), mac.to_string()));
-        }
+                // queue requests
+                let mut requests = Vec::new();
+                for mac in &todo {
+                    requests.push(fetch(client.clone(), mac.to_string()));
+                }
 
-        let mut requests = stream::iter(requests).buffer_unordered(256);
-        let mut locs = BTreeMap::new();
-        while let Some(response) = requests.try_next().await? {
-            for (mac, loc) in response {
-                locs.insert(mac, loc);
-            }
-        }
+                let mut requests = stream::iter(requests).buffer_unordered(256);
+                let mut locs = BTreeMap::new();
+                while let Some(response) = requests.try_next().await? {
+                    for (mac, loc) in response {
+                        locs.insert(mac, loc);
+                    }
+                }
 
-        if part == 0 {
-            info!(
-                "todo batch returned {} macs, {} not found",
-                locs.values().filter(|x| x.is_some()).count(),
-                locs.values().filter(|x| x.is_none()).count()
-            );
-        }
+                if part == 0 {
+                    info!(
+                        "todo batch returned {} macs, {} not found",
+                        locs.values().filter(|x| x.is_some()).count(),
+                        locs.values().filter(|x| x.is_none()).count()
+                    );
+                }
 
-        let mut crawled_cells = BTreeSet::new();
-        let mut seen_cells = BTreeSet::new();
-        for (mac, loc) in locs {
-            if let Some(loc) = loc {
-                let (cell, part) = loc.cell();
-                query!(
-                    "insert into wifi (
+                let mut crawled_cells = BTreeSet::new();
+                let mut seen_cells = BTreeSet::new();
+                for (mac, loc) in locs {
+                    if let Some(loc) = loc {
+                        let (cell, part) = loc.cell();
+                        query!(
+                            "insert into wifi (
                         part, mac, cell, lat, lon
                     ) values (
                         $1, $2, $3, $4, $5
                     ) on conflict (part, mac) do update set cell = $3, lat = $4, lon = $5",
-                    part,
-                    mac,
-                    cell,
-                    loc.lat,
-                    loc.lon,
-                )
-                .execute(&mut *tx)
-                .await?;
+                            part,
+                            mac,
+                            cell,
+                            loc.lat,
+                            loc.lon,
+                        )
+                        .execute(&mut *tx)
+                        .await?;
 
-                seen_cells.insert(cell);
-                if todo.contains(&mac) {
-                    crawled_cells.insert(cell);
+                        seen_cells.insert(cell);
+                        if todo.contains(&mac) {
+                            crawled_cells.insert(cell);
+                        }
+                    } else {
+                        query!(
+                            "update wifi set gone = true where part = $1 and mac = $2",
+                            part,
+                            mac,
+                        )
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+
+                    pb.inc(1);
+
+                    // if part == 0 {
+                    query!("delete from todo where mac = $1", mac)
+                        .execute(&mut *tx)
+                        .await?;
+                    // }
                 }
-            } else {
-                query!(
-                    "update wifi set gone = true where part = $1 and mac = $2",
-                    part,
-                    mac,
-                )
-                .execute(&mut *tx)
-                .await?;
-            }
 
-            pb.inc(1);
-
-            // if part == 0 {
-            query!("delete from todo where mac = $1", mac)
-                .execute(&mut *tx)
-                .await?;
-            // }
-        }
-
-        for cell in seen_cells {
-            query!(
+                for cell in seen_cells {
+                    query!(
                 "insert into cell (part, cell) values ($1, $2) on conflict (part, cell) do nothing",
                 cell_part(cell),
                 cell
             )
-            .execute(&mut *tx)
-            .await?;
-        }
-        for cell in crawled_cells {
-            query!(
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                for cell in crawled_cells {
+                    query!(
                 "update cell set last_crawled = current_timestamp where part = $1 and cell = $2",
                 cell_part(cell),
                 cell
             )
-            .execute(&mut *tx)
-            .await?;
-        }
+                    .execute(&mut *tx)
+                    .await?;
+                }
 
-        tx.commit().await?;
-    }
+                tx.commit().await?;
+            }
+        }.await
+    )
 }
 
 fn cell_part(cell: i64) -> i64 {
