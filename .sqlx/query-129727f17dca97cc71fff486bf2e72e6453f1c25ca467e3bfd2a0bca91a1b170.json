@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "delete from wifi where part = $1 and mac = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Macaddr"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "129727f17dca97cc71fff486bf2e72e6453f1c25ca467e3bfd2a0bca91a1b170"
+}

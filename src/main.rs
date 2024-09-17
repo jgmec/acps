@@ -185,14 +185,18 @@ async fn explore(pb: ProgressBar, client: Client, pool: PgPool, part: i64) -> (i
                 let mut seen_cells = BTreeSet::new();
                 for (mac, loc) in locs {
                     if let Some(loc) = loc {
-                        let (cell, part) = loc.cell();
+                        let (cell, loc_part) = loc.cell();
+                        if loc_part != part {
+                            query!("delete from wifi where part = $1 and mac = $2", part, mac).execute(&mut *tx).await?;
+                        }
+
                         query!(
                             "insert into wifi (
                         part, mac, cell, lat, lon
                     ) values (
                         $1, $2, $3, $4, $5
                     ) on conflict (part, mac) do update set cell = $3, lat = $4, lon = $5",
-                            part,
+                            loc_part,
                             mac,
                             cell,
                             loc.lat,
