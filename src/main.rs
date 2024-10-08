@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use futures::{stream, StreamExt, TryStreamExt};
 use h3o::Resolution;
 use mac6::Mac;
@@ -33,9 +33,15 @@ struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
-    Explore,
+    Explore { source: ExploreSource },
     Query { mac: String },
     Oui,
+}
+
+#[derive(ValueEnum, Debug, Clone)]
+enum ExploreSource {
+    Crawl,
+    Todo,
 }
 
 #[tokio::main]
@@ -44,7 +50,7 @@ async fn main() -> Result<()> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
     match cli.command {
-        Command::Explore => {
+        Command::Explore { source } => {
             let client = Client::new();
             let pool = PgPoolOptions::new()
                 .max_connections((CONCURRENT_PARTS * 2) as _)
@@ -57,39 +63,48 @@ async fn main() -> Result<()> {
 
             loop {
                 let mut crawling = BTreeSet::new();
-                let mut todo = query_scalar!("select mac from todo limit 256")
-                    .fetch_all(&pool)
-                    .await?;
-                if todo.len() == 0 {
-                    let mut tx = pool.begin().await?;
-                    let areas = query_scalar!(
-                        "select area from crawl where last_crawled is null limit 256"
-                    )
-                    .fetch_all(&mut *tx)
-                    .await?;
-                    if areas.len() == 0 {
-                        break;
-                    }
+                let todo = match source {
+                    ExploreSource::Crawl => {
+                        let mut todo = Vec::new();
+                        let mut tx = pool.begin().await?;
+                        let areas = query_scalar!(
+                            "select area from crawl where last_crawled is null limit 256"
+                        )
+                        .fetch_all(&mut *tx)
+                        .await?;
+                        if areas.len() == 0 {
+                            break;
+                        }
 
-                    for area in areas {
-                        let mac = query_scalar!(
+                        for area in areas {
+                            let mac = query_scalar!(
                             "select mac from wifi where crawl_area = $1 order by random() limit 1",
                             area
                         )
-                        .fetch_optional(&mut *tx)
-                        .await?;
-                        if let Some(mac) = mac {
-                            crawling.insert(area);
-                            todo.push(mac);
-                        } else {
-                            query!("delete from crawl where area = $1", area)
-                                .execute(&mut *tx)
-                                .await?;
+                            .fetch_optional(&mut *tx)
+                            .await?;
+                            if let Some(mac) = mac {
+                                crawling.insert(area);
+                                todo.push(mac);
+                            } else {
+                                query!("delete from crawl where area = $1", area)
+                                    .execute(&mut *tx)
+                                    .await?;
+                            }
                         }
+                        tx.commit().await?;
+                        todo
                     }
-                    tx.commit().await?;
-                }
-                info!("got todo");
+                    ExploreSource::Todo => {
+                        let todo = query_scalar!("select mac from todo limit 256")
+                            .fetch_all(&pool)
+                            .await?;
+                        if todo.len() == 0 {
+                            break;
+                        }
+                        todo
+                    }
+                };
 
                 // queue requests
                 let mut requests = Vec::new();
