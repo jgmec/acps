@@ -1,4 +1,4 @@
-create extension postgis;
+create extension if not exists postgis;
 
 create table wifi (
     mac macaddr primary key not null,
