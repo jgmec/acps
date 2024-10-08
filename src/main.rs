@@ -35,7 +35,7 @@ struct Cli {
 enum Command {
     Explore { source: ExploreSource },
     Query { mac: String },
-    Oui,
+    Oui { oui: String },
 }
 
 #[derive(ValueEnum, Debug, Clone)]
@@ -136,9 +136,9 @@ async fn main() -> Result<()> {
                 println!("not found")
             }
         }
-        Command::Oui => {
+        Command::Oui { oui } => {
             for i in 0..(256u64.pow(3)) {
-                println!("abcdef{i:06x}");
+                println!("{oui}{i:06x}");
             }
         }
     }
