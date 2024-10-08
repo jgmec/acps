@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
                         let mut todo = Vec::new();
                         let mut tx = pool.begin().await?;
                         let areas = query_scalar!(
-                            "select area from crawl where last_crawled is null limit 256"
+                            "select area from crawl where last_crawled is null order by area limit 256"
                         )
                         .fetch_all(&mut *tx)
                         .await?;

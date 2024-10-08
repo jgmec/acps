@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select area from crawl where last_crawled is null limit 256",
+  "query": "select area from crawl where last_crawled is null order by area limit 256",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "427f29d1fbabd90a2dd1c0a02d972b1ce591c3f2559961750598b34f58cf00e9"
+  "hash": "3144fe3198a6b59802e436c3003665a332f8317f112ee50d2644c9cf3d42c13a"
 }
