@@ -6,15 +6,14 @@ use std::{
     str::FromStr,
 };
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::{stream, StreamExt, TryStreamExt};
-use h3o::CellIndex;
-use indicatif::{ProgressBar, ProgressDrawTarget};
+use h3o::Resolution;
 use mac6::Mac;
+use mac_address::MacAddress;
 use reqwest::Client;
 use sqlx::{postgres::PgPoolOptions, query, query_scalar, PgPool};
-use tokio::task::JoinSet;
 
 mod fetch;
 use crate::fetch::{fetch, Location};
@@ -36,6 +35,7 @@ struct Cli {
 enum Command {
     Explore,
     Query { mac: String },
+    Oui,
 }
 
 #[tokio::main]
@@ -52,112 +52,44 @@ async fn main() -> Result<()> {
                 .await?;
             sqlx::migrate!().run(&pool).await?;
 
-            let mut parts_exploring = BTreeSet::new();
-            let mut tasks = JoinSet::new();
-            let pb = ProgressBar::new_spinner();
-            pb.set_draw_target(ProgressDrawTarget::hidden());
+            // let pb = ProgressBar::new_spinner();
+            // pb.set_draw_target(ProgressDrawTarget::hidden());
 
-            let mut to_spawn = vec![0];
             loop {
-                if (to_spawn.len() + tasks.len()) < CONCURRENT_PARTS {
-                    for part in query_scalar!("select distinct part from cell where last_crawled is null order by part limit $1", CONCURRENT_PARTS as i64).fetch_all(&pool).await? {
-                        if (to_spawn.len() + tasks.len()) < CONCURRENT_PARTS {
-                            if !parts_exploring.contains(&part) {
-                                to_spawn.push(part);
-                            }
+                let mut crawling = BTreeSet::new();
+                let mut todo = query_scalar!("select mac from todo limit 256")
+                    .fetch_all(&pool)
+                    .await?;
+                if todo.len() == 0 {
+                    let mut tx = pool.begin().await?;
+                    let areas = query_scalar!(
+                        "select area from crawl where last_crawled is null limit 256"
+                    )
+                    .fetch_all(&mut *tx)
+                    .await?;
+                    if areas.len() == 0 {
+                        break;
+                    }
+
+                    for area in areas {
+                        let mac = query_scalar!(
+                            "select mac from wifi where crawl_area = $1 order by random() limit 1",
+                            area
+                        )
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                        if let Some(mac) = mac {
+                            crawling.insert(area);
+                            todo.push(mac);
                         } else {
-                            break;
+                            query!("delete from crawl where area = $1", area)
+                                .execute(&mut *tx)
+                                .await?;
                         }
                     }
-                }
-
-                for part in to_spawn.drain(..) {
-                    if parts_exploring.insert(part) {
-                        tasks.spawn(explore(pb.clone(), client.clone(),pool.clone(), part));
-                    }
-                }
-
-                info!("exploring {} parts at {:.0}/s", tasks.len(), pb.per_sec());
-
-                if let Some(task) = tasks.join_next().await {
-                    let (part, result) = task?;
-                    parts_exploring.remove(&part);
-                    match result {
-                        Ok(()) => (),
-                        Err(e) => match e.downcast_ref::<sqlx::Error>() {
-                            Some(sqlx::Error::Database(e))
-                                if e.message() == "deadlock detected" =>
-                            {
-                                error!("part deadlocked");
-                                to_spawn.push(part);
-                            }
-                            _ => bail!(e),
-                        },
-                    }
-                } else {
-                    break;
-                }
-            }
-            pb.finish_and_clear();
-        }
-        Command::Query { mac } => {
-            let wifis = fetch(Client::new(), Mac::from_str(&mac).unwrap().to_string()).await?;
-            if let Some((_, Some(Location { lat, lon, .. }))) = wifis.first() {
-                println!(
-                    "https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=12/{lat}/{lon}"
-                );
-                dbg!(wifis.len());
-            } else {
-                println!("not found")
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn explore(pb: ProgressBar, client: Client, pool: PgPool, part: i64) -> (i64, Result<()>) {
-    (part, 
-        async {
-            loop {
-                let mut tx = pool.begin().await?;
-                let mut todo = BTreeSet::new();
-                if part == 0 {
-                    todo.extend(
-                        query_scalar!("select mac from todo limit 64")
-                            .fetch_all(&pool)
-                            .await?,
-                    );
-                } else {
-                    for cell in query_scalar!(
-                "select cell from cell where last_crawled is null and part = $1 limit $2 for update",
-                part,
-                CONCURRENT_CELLS_PER_PART as i64
-            )
-            .fetch_all(&mut *tx)
-            .await?
-            {
-                let mac = query_scalar!(
-                    "select mac from wifi where part = $1 and cell = $2 and not gone order by random() limit 1",
-                    part,
-                    cell
-                )
-                .fetch_optional(&mut *tx)
-                .await?;
-                if let Some(mac) = mac {
-                    todo.insert(mac);
-                } else {
-                    info!("deleting cell {cell:012x}");
-                    query!("delete from cell where part = $1 and cell = $2", part, cell)
-                        .execute(&mut *tx)
-                        .await?;
-                }
-            }
-                };
-                if todo.is_empty() {
                     tx.commit().await?;
-                    return Ok(());
                 }
+                info!("got todo");
 
                 // queue requests
                 let mut requests = Vec::new();
@@ -172,89 +104,107 @@ async fn explore(pb: ProgressBar, client: Client, pool: PgPool, part: i64) -> (i
                         locs.insert(mac, loc);
                     }
                 }
-
-                if part == 0 {
-                    info!(
-                        "todo batch returned {} macs, {} not found",
-                        locs.values().filter(|x| x.is_some()).count(),
-                        locs.values().filter(|x| x.is_none()).count()
-                    );
-                }
-
-                let mut crawled_cells = BTreeSet::new();
-                let mut seen_cells = BTreeSet::new();
-                for (mac, loc) in locs {
-                    if let Some(loc) = loc {
-                        let (cell, loc_part) = loc.cell();
-                        if loc_part != part {
-                            query!("delete from wifi where part = $1 and mac = $2", part, mac).execute(&mut *tx).await?;
-                        }
-
-                        query!(
-                            "insert into wifi (
-                        part, mac, cell, lat, lon
-                    ) values (
-                        $1, $2, $3, $4, $5
-                    ) on conflict (part, mac) do update set cell = $3, lat = $4, lon = $5",
-                            loc_part,
-                            mac,
-                            cell,
-                            loc.lat,
-                            loc.lon,
-                        )
-                        .execute(&mut *tx)
-                        .await?;
-
-                        seen_cells.insert(cell);
-                        if todo.contains(&mac) {
-                            crawled_cells.insert(cell);
-                        }
-                    } else {
-                        query!(
-                            "update wifi set gone = true where part = $1 and mac = $2",
-                            part,
-                            mac,
-                        )
-                        .execute(&mut *tx)
-                        .await?;
-                    }
-
-                    pb.inc(1);
-
-                    // if part == 0 {
-                    query!("delete from todo where mac = $1", mac)
-                        .execute(&mut *tx)
-                        .await?;
-                    // }
-                }
-
-                for cell in seen_cells {
-                    query!(
-                "insert into cell (part, cell) values ($1, $2) on conflict (part, cell) do nothing",
-                cell_part(cell),
-                cell
-            )
-                    .execute(&mut *tx)
-                    .await?;
-                }
-                for cell in crawled_cells {
-                    query!(
-                "update cell set last_crawled = current_timestamp where part = $1 and cell = $2",
-                cell_part(cell),
-                cell
-            )
-                    .execute(&mut *tx)
-                    .await?;
-                }
-
-                tx.commit().await?;
+                info!("got responses");
+                commit(pool.clone(), crawling, locs).await?;
             }
-        }.await
-    )
+
+            // pb.finish_and_clear();
+        }
+        Command::Query { mac } => {
+            let wifis = fetch(Client::new(), Mac::from_str(&mac).unwrap().to_string()).await?;
+            if let Some((_, Some(Location { lat, lon, .. }))) = wifis.first() {
+                println!(
+                    "https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=12/{lat}/{lon}"
+                );
+                dbg!(wifis.len());
+            } else {
+                println!("not found")
+            }
+        }
+        Command::Oui => {
+            for i in 0..(256u64.pow(3)) {
+                println!("abcdef{i:06x}");
+            }
+        }
+    }
+
+    Ok(())
 }
 
-fn cell_part(cell: i64) -> i64 {
-    let cell = CellIndex::try_from(cell as u64).unwrap();
-    let part: u64 = cell.parent(h3o::Resolution::Six).unwrap().into();
-    part as i64
+async fn commit(
+    pool: PgPool,
+    crawling: BTreeSet<i64>,
+    locs: BTreeMap<MacAddress, Option<Location>>,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+
+    info!(
+        "{} returned, {} not found",
+        locs.values().filter(|x| x.is_some()).count(),
+        locs.values().filter(|x| x.is_none()).count()
+    );
+
+    let mut check_areas = BTreeSet::new();
+    for loc in locs.values().flatten() {
+        check_areas.insert(loc.cell(Resolution::Nine));
+    }
+    for area in check_areas.clone() {
+        check_areas.extend(area.edges().map(|x| x.destination()))
+    }
+    let mut known = BTreeSet::new();
+    for area in check_areas {
+        known.extend(
+            query_scalar!(
+                "select mac from wifi where check_area = $1",
+                u64::from(area) as i64
+            )
+            .fetch_all(&mut *tx)
+            .await?,
+        );
+    }
+    info!("queried known");
+
+    for (mac, loc) in locs {
+        query!("delete from todo where mac = $1", mac)
+            .execute(&mut *tx)
+            .await?;
+
+        if let Some(loc) = loc {
+            if known.contains(&mac) {
+                continue;
+            }
+
+            let check_area = u64::from(loc.cell(Resolution::Nine)) as i64;
+            let crawl_area = u64::from(loc.cell(Resolution::Eleven)) as i64;
+            let Location { lat, lon, .. } = loc;
+            query!("insert into wifi (mac, geom, check_area, crawl_area) values ($1, ST_SetSRID(ST_MakePoint($2, $3), 4326), $4, $5) on conflict do nothing", mac, lon, lat, check_area, crawl_area)
+                .execute(&mut *tx)
+                .await?;
+            query!(
+                "insert into crawl (area) values ($1) on conflict do nothing",
+                crawl_area
+            )
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            query!("delete from wifi where mac = $1", mac)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    info!("written wifi");
+
+    for area in crawling {
+        query!(
+            "update crawl set last_crawled = current_timestamp where area = $1",
+            area
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    info!("written crawl");
+
+    tx.commit().await?;
+    info!("comitted");
+    Ok(())
 }

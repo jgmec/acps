@@ -1,7 +1,7 @@
 use std::{error::Error, time::Duration};
 
 use anyhow::{bail, Result};
-use h3o::{CellIndex, LatLng};
+use h3o::{CellIndex, LatLng, Resolution};
 use mac6::Mac;
 use mac_address::MacAddress;
 use prost::Message;
@@ -37,15 +37,8 @@ impl Location {
         None
     }
 
-    pub fn cell(&self) -> (i64, i64) {
-        let cell = CellIndex::from(
-            LatLng::new(self.lat, self.lon)
-                .unwrap()
-                .to_cell(h3o::Resolution::Ten),
-        );
-        let cell3: u64 = cell.parent(h3o::Resolution::Six).unwrap().into();
-        let cell: u64 = cell.into();
-        (cell as i64, cell3 as i64)
+    pub fn cell(&self, res: Resolution) -> CellIndex {
+        LatLng::new(self.lat, self.lon).unwrap().to_cell(res)
     }
 }
 

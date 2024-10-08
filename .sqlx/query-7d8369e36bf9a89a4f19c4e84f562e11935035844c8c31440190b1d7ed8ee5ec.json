@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select mac from todo limit 64",
+  "query": "select mac from wifi where crawl_area = $1 order by random() limit 1",
   "describe": {
     "columns": [
       {
@@ -10,11 +10,13 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Int8"
+      ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "e5e3c32133eb6caf88ad4d310e14e184ca614ff5e52e717398c58609265f0924"
+  "hash": "7d8369e36bf9a89a4f19c4e84f562e11935035844c8c31440190b1d7ed8ee5ec"
 }

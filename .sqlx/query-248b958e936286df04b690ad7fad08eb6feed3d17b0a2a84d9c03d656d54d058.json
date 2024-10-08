@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update crawl set last_crawled = current_timestamp where area = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "248b958e936286df04b690ad7fad08eb6feed3d17b0a2a84d9c03d656d54d058"
+}

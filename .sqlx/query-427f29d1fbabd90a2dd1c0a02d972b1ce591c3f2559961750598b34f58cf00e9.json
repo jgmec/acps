@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select area from crawl where last_crawled is null limit 256",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "area",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "427f29d1fbabd90a2dd1c0a02d972b1ce591c3f2559961750598b34f58cf00e9"
+}

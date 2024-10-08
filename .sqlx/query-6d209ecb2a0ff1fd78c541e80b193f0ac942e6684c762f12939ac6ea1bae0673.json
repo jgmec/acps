@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select mac from todo limit 256",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "mac",
+        "type_info": "Macaddr"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6d209ecb2a0ff1fd78c541e80b193f0ac942e6684c762f12939ac6ea1bae0673"
+}
