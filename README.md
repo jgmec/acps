@@ -58,8 +58,48 @@ You can monitor progress by querying the DB:
 select count(*) from todo;
 
 -- cell: areas crawled, exploration queue
-select count(*) from cell where last_crawled is null;
+select count(*) from crawl where last_crawled is null;
 
 -- wifi: scraped wifi networks
 select count(*) from wifi;
+```
+
+## Development
+
+wtfps is a Nix flake, meaning you can easily pull required dependencies into your environment using `nix dev` and can also compile the project using `nix build`.
+
+If you don't have Nix setup on your system, you will need to install the following:
+
+- Rust
+- PostgreSQL v16 <!-- - [PostGIS](https://postgis.net/) -->
+- Protobuf: required to serialize requests for Apple's servers
+- [SQLx CLI](https://github.com/launchbadge/sqlx/tree/main/sqlx-cli#install): required to configure the database
+
+SQLx attempts to validate queries using a live database when compiling the project. You can tell SQLx how to connect to your database by setting the `DATABASE_URL` environment variable, which you can add to `.env`. [DATABASE_URL docs](https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgConnectOptions.html)
+
+```sh
+# unix socket
+DATABASE_URL=postgresql:///wtfps
+
+# tcp
+DATABASE_URL=postgresql://user:password@localhost/wtfps
+```
+
+You should now be able to create the database, add your seeds to the `todo` table and start scraping:
+
+```sh
+# reset command will drop, create and apply migrations in one go
+$ sqlx database reset
+Drop database at postgres:///wtfps2 (y/n): y
+Applied 20241008024704/migrate init (430ms)
+
+$ psql wtfps
+wtfps=# insert into todo values ('aa:bb:cc:dd:ee:ff');
+INSERT 0 1
+wtfps=# \q
+
+# query macs in the todo table
+$ cargo run --release explore todo
+# continually crawl new macs
+$ cargo run --release explore crawl
 ```

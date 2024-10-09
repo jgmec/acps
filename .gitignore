@@ -7,5 +7,7 @@ result*
 *.bin
 *.bin.zst
 
+.env
+
 # samply
 profile.json
