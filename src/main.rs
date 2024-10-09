@@ -12,11 +12,10 @@ use futures::{stream, StreamExt, TryStreamExt};
 use h3o::Resolution;
 use mac6::Mac;
 use mac_address::MacAddress;
-use reqwest::Client;
 use sqlx::{postgres::PgPoolOptions, query, query_scalar, PgPool};
 
 mod fetch;
-use crate::fetch::{fetch, Location};
+use crate::fetch::{AppleWPSClient, Location};
 
 pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/apple.rs"));
@@ -29,6 +28,8 @@ const CONCURRENT_CELLS_PER_PART: usize = 8;
 struct Cli {
     #[clap(subcommand)]
     command: Command,
+    #[arg(long)]
+    china: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -49,9 +50,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
+    let client = AppleWPSClient::new(cli.china);
+
     match cli.command {
         Command::Explore { source } => {
-            let client = Client::new();
             let pool = PgPoolOptions::new()
                 .max_connections((CONCURRENT_PARTS * 2) as _)
                 .connect(dbg!(&dotenvy::var("DATABASE_URL")?))
@@ -109,7 +111,7 @@ async fn main() -> Result<()> {
                 // queue requests
                 let mut requests = Vec::new();
                 for mac in &todo {
-                    requests.push(fetch(client.clone(), mac.to_string()));
+                    requests.push(client.query_wifi(*mac));
                 }
 
                 let mut requests = stream::iter(requests).buffer_unordered(256);
@@ -126,7 +128,9 @@ async fn main() -> Result<()> {
             // pb.finish_and_clear();
         }
         Command::Query { mac } => {
-            let wifis = fetch(Client::new(), Mac::from_str(&mac).unwrap().to_string()).await?;
+            let wifis = client
+                .query_wifi(Mac::from_str(&mac).unwrap().0.into())
+                .await?;
             if let Some((_, Some(Location { lat, lon, .. }))) = wifis.first() {
                 println!(
                     "https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=12/{lat}/{lon}"
