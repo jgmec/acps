@@ -1,6 +1,6 @@
 # wtfps
 
-Extracts a _stupid amount_ of data from Apple's WiFi Positioning System. Built to gather large amounts of information to use for research and benchmarking.
+Extracts a [_stupid amount_ of data](https://pub.joel.net.au/datasets/wtfps/viewer.html) from Apple's WiFi Positioning System. Built to gather large amounts of information to use for research and benchmarking.
 
 When devices query Apple's servers for WiFi location information, Apple will respond with up to 400 additional nearby MACs. This was likely implemented to support a client-side cache of nearby WiFi networks, as this would significantly reduce the amount of requests made to Apple's servers, improving privacy and reducing infrastructure costs. However, this is extremely poorly implemented, and can be abused to extract global WiFi coverage information.
 
