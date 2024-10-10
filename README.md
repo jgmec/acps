@@ -2,24 +2,15 @@
 
 Extracts a _stupid amount_ of data from Apple's WiFi Positioning System. Built to gather large amounts of information to use for research and benchmarking.
 
+When devices query Apple's servers for WiFi location information, Apple will respond with up to 400 additional nearby MACs. This was likely implemented to support a client-side cache of nearby WiFi networks, as this would significantly reduce the amount of requests made to Apple's servers, improving privacy and reducing infrastructure costs. However, this is extremely poorly implemented, and can be abused to extract global WiFi coverage information.
+
+wtfps takes advantage of this feature and can be used to scrape estimated locations for over a billion WiFi networks around the world. It keeps a record of where it has explored and will continually query newly discovered MACs in unknown areas to gather more coverage.
+
 ## Resources
 
 - [acheong08/apple-corelocation-experiments](https://github.com/acheong08/apple-corelocation-experiments) - reverse engineering, API client implementation in Go
 - [Surveilling the Masses with Wi-Fi-Based Positioning Systems](https://www.cs.umd.edu/~dml/papers/wifi-surveillance-sp24.pdf) - research paper
 - [ReverseApple/appleloc](https://github.com/ReverseApple/appleloc) - API client implementation in Rust
-
-## Design
-
-- Apple's DB will return up to 400 nearby MACs when queried. wtfps takes advantage of this to explore further by continually querying new MACs
-- uses h3 cells with resolution 10 to keep track of areas that have been crawled
-  - significantly increases crawling speed by deduplicating requests that would return the same information
-  - wtfps tries to crawl MACs that are nearby to reduce unnecessary database writes as requests will return overlapping data
-- database is split into 16 partitions by location
-  - identified using [H3 cells](https://www.uber.com/en-AU/blog/h3/) with resolution 3
-    - 12 393 km^2 on average per part, 41.2k unique parts globally - [source](https://h3geo.org/docs/core-library/restable/#average-area-in-m2)
-  - hash based partitioning
-  - MAC uniqueness is only enforced per cell
-  - could allow for concurrency when crawling?
 
 ## Usage
 
