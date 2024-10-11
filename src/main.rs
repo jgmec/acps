@@ -114,6 +114,7 @@ async fn main() -> Result<()> {
                     requests.push(client.query_wifi(*mac));
                 }
 
+                info!("making {} requests...", requests.len());
                 let mut requests = stream::iter(requests).buffer_unordered(256);
                 let mut locs = BTreeMap::new();
                 while let Some(response) = requests.try_next().await? {
@@ -121,7 +122,6 @@ async fn main() -> Result<()> {
                         locs.insert(mac, loc);
                     }
                 }
-                info!("got responses");
                 commit(pool.clone(), crawling, locs).await?;
             }
 
@@ -131,10 +131,8 @@ async fn main() -> Result<()> {
             let wifis = client
                 .query_wifi(Mac::from_str(&mac).unwrap().0.into())
                 .await?;
-            if let Some((_, Some(Location { lat, lon, .. }))) = wifis.first() {
-                println!(
-                    "https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=12/{lat}/{lon}"
-                );
+            if let Some((_, Some(loc))) = wifis.first() {
+                println!("{}", osm(loc));
                 dbg!(wifis.len());
             } else {
                 println!("not found")
@@ -158,10 +156,13 @@ async fn commit(
     let mut tx = pool.begin().await?;
 
     info!(
-        "{} returned, {} not found",
+        "{} macs received, {} not found",
         locs.values().filter(|x| x.is_some()).count(),
         locs.values().filter(|x| x.is_none()).count()
     );
+    if let Some(loc) = locs.values().flatten().next() {
+        info!("{}", osm(loc));
+    }
 
     let mut check_areas = BTreeSet::new();
     for loc in locs.values().flatten() {
@@ -181,7 +182,6 @@ async fn commit(
             .await?,
         );
     }
-    info!("queried known");
 
     for (mac, loc) in locs {
         query!("delete from todo where mac = $1", mac)
@@ -211,7 +211,6 @@ async fn commit(
                 .await?;
         }
     }
-    info!("written wifi");
 
     for area in crawling {
         query!(
@@ -221,9 +220,11 @@ async fn commit(
         .execute(&mut *tx)
         .await?;
     }
-    info!("written crawl");
 
     tx.commit().await?;
-    info!("comitted");
     Ok(())
+}
+
+fn osm(Location { lat, lon, .. }: &Location) -> String {
+    format!("https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=12/{lat}/{lon}")
 }
