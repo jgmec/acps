@@ -1,5 +1,6 @@
 { pkgs, ... }:
 
+
 {
   services.postgresql = {
     ensureDatabases = [
@@ -12,86 +13,34 @@
     ];
   };
 
-  systemd = {
-    services.wtfps-crawl = {
-      after = [ "network.target" ];
-      requires = [ "postgresql.service" ];
-      wantedBy = [ "multi-user.target" ];
+  systemd.services =
+    let
+      mkService = db: args: {
+        after = [ "network.target" ];
+        requires = [ "postgresql.service" ];
+        wantedBy = [ "multi-user.target" ];
 
-      script = ''
-        ${pkgs.wtfps}/bin/wtfps explore crawl
-      '';
+        script = ''
+          ${pkgs.wtfps}/bin/wtfps ${args}
+        '';
 
-      environment.DATABASE_URL = "postgres:///wtfps";
+        environment.DATABASE_URL = "postgres:///${db}";
 
-      serviceConfig = {
-        Type = "simple";
+        serviceConfig = {
+          Type = "simple";
 
-        DynamicUser = true;
-        User = "wtfps";
-        Restart = "on-failure";
+          DynamicUser = true;
+          User = db;
+          Restart = "on-failure";
+        };
       };
+    in
+
+    {
+      wtfps-crawl = mkService "wtfps" "explore crawl";
+      wtfps-todo = mkService "wtfps" "explore todo";
+      wtfps-crawl-china = mkService "wtfps_cn" "explore crawl";
+      wtfps-todo-china = mkService "wtfps_cn" "explore todo";
     };
-
-    services.wtfps-todo = {
-      after = [ "network.target" ];
-      requires = [ "postgresql.service" ];
-      wantedBy = [ "multi-user.target" ];
-
-      script = ''
-        ${pkgs.wtfps}/bin/wtfps explore todo
-      '';
-
-      environment.DATABASE_URL = "postgres:///wtfps";
-
-      serviceConfig = {
-        Type = "simple";
-
-        DynamicUser = true;
-        User = "wtfps";
-        Restart = "on-failure";
-      };
-    };
-
-    services.wtfps-cn-crawl = {
-      after = [ "network.target" ];
-      requires = [ "postgresql.service" ];
-      wantedBy = [ "multi-user.target" ];
-
-      script = ''
-        ${pkgs.wtfps}/bin/wtfps --china explore crawl
-      '';
-
-      environment.DATABASE_URL = "postgres:///wtfps_cn";
-
-      serviceConfig = {
-        Type = "simple";
-
-        DynamicUser = true;
-        User = "wtfps_cn";
-        Restart = "on-failure";
-      };
-    };
-
-    services.wtfps-cn-todo = {
-      after = [ "network.target" ];
-      requires = [ "postgresql.service" ];
-      wantedBy = [ "multi-user.target" ];
-
-      script = ''
-        ${pkgs.wtfps}/bin/wtfps --china explore todo
-      '';
-
-      environment.DATABASE_URL = "postgres:///wtfps_cn";
-
-      serviceConfig = {
-        Type = "simple";
-
-        DynamicUser = true;
-        User = "wtfps_cn";
-        Restart = "on-failure";
-      };
-    };
-  };
 }
 
