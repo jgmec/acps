@@ -39,8 +39,8 @@
     {
       wtfps-crawl = mkService "wtfps" "explore crawl";
       wtfps-todo = mkService "wtfps" "explore todo";
-      wtfps-crawl-china = mkService "wtfps_cn" "explore crawl";
-      wtfps-todo-china = mkService "wtfps_cn" "explore todo";
+      wtfps-crawl-china = mkService "wtfps_cn" "--china explore crawl";
+      wtfps-todo-china = mkService "wtfps_cn" "--china explore todo";
     };
 }
 
