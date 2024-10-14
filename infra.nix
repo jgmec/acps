@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ lib, pkgs, ... }:
 
 
 {
@@ -20,9 +20,13 @@
         requires = [ "postgresql.service" ];
         wantedBy = [ "multi-user.target" ];
 
-        script = ''
-          ${pkgs.wtfps}/bin/wtfps ${args} | ${pkgs.mosquitto}/bin/mosquitto_pub -L "mqtt://192.168.1.3/${db}" -l
-        '';
+        script = lib.getExe (with pkgs; writeShellApplication {
+          name = "wtfps";
+          runtimeInputs = [ wtfps mosquitto ];
+          text = ''
+            wtfps ${args} | mosquitto_pub -L "mqtt://192.168.1.3/${db}" -l
+          '';
+        });
 
         environment.DATABASE_URL = "postgres:///${db}";
 
