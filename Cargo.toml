@@ -20,6 +20,7 @@ dotenvy = "0.15.7"
 mac6 = "1.1.0"
 mac_address = "1.1.7"
 indicatif = "0.17.8"
+serde_json = "1.0.128"
 
 [build-dependencies]
 prost-build = "0.13.1"

@@ -12,6 +12,7 @@ use futures::{stream, StreamExt, TryStreamExt};
 use h3o::Resolution;
 use mac6::Mac;
 use mac_address::MacAddress;
+use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, query, query_scalar, PgPool};
 
 mod fetch;
@@ -160,9 +161,6 @@ async fn commit(
         locs.values().filter(|x| x.is_some()).count(),
         locs.values().filter(|x| x.is_none()).count()
     );
-    if let Some(loc) = locs.values().flatten().next() {
-        info!("{}", osm(loc));
-    }
 
     let mut check_areas = BTreeSet::new();
     for loc in locs.values().flatten() {
@@ -205,6 +203,8 @@ async fn commit(
             )
             .execute(&mut *tx)
             .await?;
+
+            println!("{}", json!({"lat": lat, "lon": lon}));
         } else {
             query!("delete from wifi where mac = $1", mac)
                 .execute(&mut *tx)
