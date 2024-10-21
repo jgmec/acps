@@ -35,15 +35,25 @@ struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
-    Explore { source: ExploreSource },
-    Query { mac: String },
-    Oui { oui: String },
+    Explore {
+        #[clap(subcommand)]
+        source: ExploreSource,
+    },
+    Query {
+        mac: String,
+    },
+    Oui {
+        oui: String,
+    },
 }
 
-#[derive(ValueEnum, Debug, Clone)]
+#[derive(Subcommand, Debug, Clone)]
 enum ExploreSource {
     Crawl,
-    Todo,
+    Todo {
+        #[arg(long)]
+        ignore_extra: bool,
+    },
 }
 
 #[tokio::main]
@@ -98,7 +108,7 @@ async fn main() -> Result<()> {
                         tx.commit().await?;
                         todo
                     }
-                    ExploreSource::Todo => {
+                    ExploreSource::Todo { .. } => {
                         let todo = query_scalar!("select mac from todo limit 256")
                             .fetch_all(&pool)
                             .await?;
@@ -115,11 +125,22 @@ async fn main() -> Result<()> {
                     requests.push(client.query_wifi(*mac));
                 }
 
+                let ignore_extra = match source {
+                    ExploreSource::Todo { ignore_extra } => ignore_extra,
+                    _ => false,
+                };
+
                 info!("making {} requests...", requests.len());
                 let mut requests = stream::iter(requests).buffer_unordered(256);
                 let mut locs = BTreeMap::new();
                 while let Some(response) = requests.try_next().await? {
                     for (mac, loc) in response {
+                        if ignore_extra {
+                            if !todo.contains(&mac) {
+                                continue;
+                            }
+                        }
+
                         locs.insert(mac, loc);
                     }
                 }
