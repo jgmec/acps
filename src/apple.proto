@@ -13,7 +13,7 @@ message AppleWLoc {
   repeated WifiDevice wifi_devices = 2;
 
   repeated CellTower cell_tower_response = 22;
-  optional CellTower cell_tower_request = 25;
+  repeated CellTower cell_tower_request = 25;
 }
 
 message CellTower {

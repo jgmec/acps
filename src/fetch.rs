@@ -7,7 +7,7 @@ use mac_address::MacAddress;
 use prost::Message;
 use tryhard::retry_fn;
 
-use crate::protobuf::{AppleWLoc, WifiDevice};
+use crate::protobuf::{AppleWLoc, CellTower, WifiDevice};
 
 #[derive(Clone)]
 pub struct AppleWPSClient {
@@ -99,6 +99,24 @@ impl AppleWPSClient {
                     .expect("response uses (-180, -180) to represent not found"),
             );
             output.push((MacAddress::new(mac.0), loc));
+        }
+        Ok(output)
+    }
+
+    pub async fn query_cell(&self, cell: CellTower) -> Result<Vec<(CellTower, Option<Location>)>> {
+        println!("Deserialized: {:?}", cell);
+
+        let x = self
+            .query(AppleWLoc {
+                cell_tower_request: vec![cell], ..Default::default() })
+            .await?;
+
+        let mut output = Vec::new();
+        for x in x.cell_tower_response {
+            output.push((x, Location::from_raw(
+                x.location
+                    .expect("response uses (-180, -180) to represent not found"),
+            )));
         }
         Ok(output)
     }

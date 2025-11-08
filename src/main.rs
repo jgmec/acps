@@ -1,29 +1,33 @@
 #[macro_use]
 extern crate log;
 
+use std::string::String;
 use std::{
     collections::{BTreeMap, BTreeSet},
     str::FromStr,
 };
 
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use futures::{stream, StreamExt, TryStreamExt};
 use h3o::Resolution;
 use mac6::Mac;
 use mac_address::MacAddress;
 use serde_json::json;
+
 use sqlx::{postgres::PgPoolOptions, query, query_scalar, PgPool};
+
 
 mod fetch;
 use crate::fetch::{AppleWPSClient, Location};
+use crate::protobuf::CellTower;
 
 pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/apple.rs"));
 }
 
 const CONCURRENT_PARTS: usize = 8;
-const CONCURRENT_CELLS_PER_PART: usize = 8;
+//const CONCURRENT_CELLS_PER_PART: usize = 8;
 
 #[derive(Parser)]
 struct Cli {
@@ -41,6 +45,12 @@ enum Command {
     },
     Query {
         mac: String,
+    },
+    Cell {
+        mcc: String,
+        mnc: String,
+        tacid: String,
+        cellid: String,
     },
     Oui {
         oui: String,
@@ -160,8 +170,38 @@ async fn main() -> Result<()> {
                 println!("not found")
             }
         }
+
+        Command::Cell { mcc, mnc, tacid, cellid } =>{
+            println!("cellid: {cellid}");
+
+            let cells = client
+                .query_cell(CellTower{
+                    mcc: (&mcc).parse().unwrap(),
+                    mnc: (&mnc).parse().unwrap(),
+                    cell_id: (&cellid).parse().unwrap(),
+                    tac_id: (&tacid).parse().unwrap(),
+                    location: None,
+                    uarfcn: None,
+                    pid: None,
+                })
+                .await?;
+            if let Some((_, Some(loc))) = cells.first() {
+                println!("{}", osm(loc));
+                dbg!(cells.len());
+            } else {
+                println!("not found")
+            }
+            for c in cells {
+
+                print!("cellid {}", c.0.cell_id);
+                print!("\t\thorizontal_accuracy {:?}", c.0.location.unwrap().horizontal_accuracy);
+                println!("\t\tlocation {}", osm(&Location::from(c.1.expect("REASON")) ));
+            }
+
+        }
+
         Command::Oui { oui } => {
-            for i in 0..(256u64.pow(3)) {
+            for i in 0..256u64.pow(3) {
                 println!("{oui}{i:06x}");
             }
         }
@@ -247,5 +287,5 @@ async fn commit(
 }
 
 fn osm(Location { lat, lon, .. }: &Location) -> String {
-    format!("https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=12/{lat}/{lon}")
+    format!("https://www.openstreetmap.org/search?query={lat}%2F{lon}#map=16/{lat}/{lon}")
 }
