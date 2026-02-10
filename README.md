@@ -55,6 +55,18 @@ select count(*) from crawl where last_crawled is null;
 select count(*) from wifi;
 ```
 
+### `cell`
+
+You can query the location of a single Cell using `wtfps cell`:
+
+```
+$ wtfps cell 284 1 1401 8168961
+cellid: 8168961
+Deserialized: CellTower { mcc: 284, mnc: 1, cell_id: 8168961, tac_id: 1401, location: None, uarfcn: None, pid: None }
+https://www.openstreetmap.org/search?query=42.66833496%2F23.28340721#map=16/42.66833496/23.28340721
+[src/main.rs:190:17] cells.len() = 121
+```
+
 ## Development
 
 wtfps is a Nix flake, meaning you can easily pull required dependencies into your environment using `nix dev` and can also compile the project using `nix build`.
