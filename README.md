@@ -48,7 +48,7 @@ You can monitor progress by querying the DB:
 -- todo: user-controlled queue
 select count(*) from todo;
 
--- cell: areas crawled, exploration queue
+-- crawl: areas queued for WiFi exploration
 select count(*) from crawl where last_crawled is null;
 
 -- wifi: scraped wifi networks
@@ -57,14 +57,35 @@ select count(*) from wifi;
 
 ### `cell`
 
-You can query the location of a single Cell using `wtfps cell`:
+You can query the location of a single cell tower using `wtfps cell <mcc> <mnc> <tacid> <cellid>`:
 
 ```
 $ wtfps cell 284 1 1401 8168961
 cellid: 8168961
-Deserialized: CellTower { mcc: 284, mnc: 1, cell_id: 8168961, tac_id: 1401, location: None, uarfcn: None, pid: None }
 https://www.openstreetmap.org/search?query=42.66833496%2F23.28340721#map=16/42.66833496/23.28340721
 [src/main.rs:190:17] cells.len() = 121
+```
+
+### `explore cell`
+
+Works like `explore todo/crawl` but for cell towers. Seed `cell_todo` with one or more known cell towers and wtfps will crawl outward, discovering and storing nearby cells returned by Apple's API.
+
+```sh
+# seed with a known cell tower (mcc, mnc, tac_id, cell_id)
+wtfps=# insert into cell_todo (mcc, mnc, tac_id, cell_id) values (284, 1, 1401, 8168961);
+
+# start crawling
+$ cargo run --release -- explore cell
+```
+
+Monitor progress:
+
+```sql
+-- queued cells pending exploration
+select count(*) from cell_todo;
+
+-- collected cell towers with location
+select count(*) from cell;
 ```
 
 ## Development

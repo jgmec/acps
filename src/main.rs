@@ -64,6 +64,7 @@ enum ExploreSource {
         #[arg(long)]
         ignore_extra: bool,
     },
+    Cell,
 }
 
 #[tokio::main]
@@ -81,83 +82,115 @@ async fn main() -> Result<()> {
                 .await?;
             sqlx::migrate!().run(&pool).await?;
 
-            // let pb = ProgressBar::new_spinner();
-            // pb.set_draw_target(ProgressDrawTarget::hidden());
+            match source {
+                ExploreSource::Cell => loop {
+                    let todo: Vec<(i32, i32, i32, i64)> = sqlx::query_as(
+                        "select mcc, mnc, tac_id, cell_id from cell_todo limit 256",
+                    )
+                    .fetch_all(&pool)
+                    .await?;
 
-            loop {
-                let mut crawling = BTreeSet::new();
-                let todo = match source {
-                    ExploreSource::Crawl => {
-                        let mut todo = Vec::new();
-                        let mut tx = pool.begin().await?;
-                        let areas = query_scalar!(
-                            "select area from crawl where last_crawled is null order by area limit 256"
-                        )
-                        .fetch_all(&mut *tx)
-                        .await?;
-                        if areas.len() == 0 {
-                            break;
-                        }
+                    if todo.is_empty() {
+                        break;
+                    }
 
-                        for area in areas {
-                            let mac = query_scalar!(
-                            "select mac from wifi where crawl_area = $1 order by random() limit 1",
-                            area
-                        )
-                            .fetch_optional(&mut *tx)
+                    let requests: Vec<_> = todo
+                        .iter()
+                        .map(|&(mcc, mnc, tac_id, cell_id)| {
+                            client.query_cell(CellTower {
+                                mcc: mcc as u32,
+                                mnc: mnc as u32,
+                                tac_id: tac_id as u32,
+                                cell_id: cell_id as u32,
+                                location: None,
+                                uarfcn: None,
+                                pid: None,
+                            })
+                        })
+                        .collect();
+
+                    info!("making {} cell requests...", requests.len());
+                    let mut stream = stream::iter(requests).buffer_unordered(CONCURRENT_PARTS);
+                    let mut results = Vec::new();
+                    while let Some(resp) = stream.try_next().await? {
+                        results.extend(resp);
+                    }
+
+                    commit_cells(pool.clone(), todo, results).await?;
+                },
+
+                _ => loop {
+                    let mut crawling = BTreeSet::new();
+                    let todo = match source {
+                        ExploreSource::Crawl => {
+                            let mut todo = Vec::new();
+                            let mut tx = pool.begin().await?;
+                            let areas = query_scalar!(
+                                "select area from crawl where last_crawled is null order by area limit 256"
+                            )
+                            .fetch_all(&mut *tx)
                             .await?;
-                            if let Some(mac) = mac {
-                                crawling.insert(area);
-                                todo.push(mac);
-                            } else {
-                                query!("delete from crawl where area = $1", area)
-                                    .execute(&mut *tx)
-                                    .await?;
+                            if areas.len() == 0 {
+                                break;
                             }
-                        }
-                        tx.commit().await?;
-                        todo
-                    }
-                    ExploreSource::Todo { .. } => {
-                        let todo = query_scalar!("select mac from todo limit 256")
-                            .fetch_all(&pool)
-                            .await?;
-                        if todo.len() == 0 {
-                            break;
-                        }
-                        todo
-                    }
-                };
 
-                // queue requests
-                let mut requests = Vec::new();
-                for mac in &todo {
-                    requests.push(client.query_wifi(*mac));
-                }
-
-                let ignore_extra = match source {
-                    ExploreSource::Todo { ignore_extra } => ignore_extra,
-                    _ => false,
-                };
-
-                info!("making {} requests...", requests.len());
-                let mut requests = stream::iter(requests).buffer_unordered(256);
-                let mut locs = BTreeMap::new();
-                while let Some(response) = requests.try_next().await? {
-                    for (mac, loc) in response {
-                        if ignore_extra {
-                            if !todo.contains(&mac) {
-                                continue;
+                            for area in areas {
+                                let mac = query_scalar!(
+                                    "select mac from wifi where crawl_area = $1 order by random() limit 1",
+                                    area
+                                )
+                                .fetch_optional(&mut *tx)
+                                .await?;
+                                if let Some(mac) = mac {
+                                    crawling.insert(area);
+                                    todo.push(mac);
+                                } else {
+                                    query!("delete from crawl where area = $1", area)
+                                        .execute(&mut *tx)
+                                        .await?;
+                                }
                             }
+                            tx.commit().await?;
+                            todo
                         }
+                        ExploreSource::Todo { .. } => {
+                            let todo = query_scalar!("select mac from todo limit 256")
+                                .fetch_all(&pool)
+                                .await?;
+                            if todo.len() == 0 {
+                                break;
+                            }
+                            todo
+                        }
+                        ExploreSource::Cell => unreachable!(),
+                    };
 
-                        locs.insert(mac, loc);
+                    let mut requests = Vec::new();
+                    for mac in &todo {
+                        requests.push(client.query_wifi(*mac));
                     }
-                }
-                commit(pool.clone(), crawling, locs).await?;
+
+                    let ignore_extra = match source {
+                        ExploreSource::Todo { ignore_extra } => ignore_extra,
+                        _ => false,
+                    };
+
+                    info!("making {} requests...", requests.len());
+                    let mut requests = stream::iter(requests).buffer_unordered(256);
+                    let mut locs = BTreeMap::new();
+                    while let Some(response) = requests.try_next().await? {
+                        for (mac, loc) in response {
+                            if ignore_extra {
+                                if !todo.contains(&mac) {
+                                    continue;
+                                }
+                            }
+                            locs.insert(mac, loc);
+                        }
+                    }
+                    commit(pool.clone(), crawling, locs).await?;
+                },
             }
-
-            // pb.finish_and_clear();
         }
         Command::Query { mac } => {
             let wifis = client
@@ -191,11 +224,15 @@ async fn main() -> Result<()> {
             } else {
                 println!("not found")
             }
-            for c in cells {
-
-                print!("cellid {}", c.0.cell_id);
-                print!("\t\thorizontal_accuracy {:?}", c.0.location.unwrap().horizontal_accuracy);
-                println!("\t\tlocation {}", osm(&Location::from(c.1.expect("REASON")) ));
+            for (cell, loc) in cells {
+                print!("cellid {}", cell.cell_id);
+                if let Some(raw_loc) = cell.location {
+                    print!("\t\thorizontal_accuracy {:?}", raw_loc.horizontal_accuracy);
+                }
+                match loc {
+                    Some(l) => println!("\t\tlocation {}", osm(&l)),
+                    None => println!("\t\tnot found"),
+                }
             }
 
         }
@@ -278,6 +315,74 @@ async fn commit(
             "update crawl set last_crawled = current_timestamp where area = $1",
             area
         )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn commit_cells(
+    pool: PgPool,
+    queried: Vec<(i32, i32, i32, i64)>,
+    results: Vec<(CellTower, Option<Location>)>,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+
+    let queried_set: BTreeSet<_> = queried.iter().cloned().collect();
+
+    info!(
+        "{} cells with location, {} not found",
+        results.iter().filter(|(_, l)| l.is_some()).count(),
+        results.iter().filter(|(_, l)| l.is_none()).count(),
+    );
+
+    for (cell, loc) in results {
+        let mcc = cell.mcc as i32;
+        let mnc = cell.mnc as i32;
+        let tac_id = cell.tac_id as i32;
+        let cell_id = cell.cell_id as i64;
+
+        let Some(loc) = loc else { continue };
+        let Location { lat, lon, .. } = loc;
+
+        let inserted: Option<i64> = sqlx::query_scalar(
+            "insert into cell (mcc, mnc, tac_id, cell_id, geom) \
+             values ($1, $2, $3, $4, ST_SetSRID(ST_MakePoint($5, $6), 4326)) \
+             on conflict do nothing returning cell_id",
+        )
+        .bind(mcc)
+        .bind(mnc)
+        .bind(tac_id)
+        .bind(cell_id)
+        .bind(lon)
+        .bind(lat)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if inserted.is_some() && !queried_set.contains(&(mcc, mnc, tac_id, cell_id)) {
+            sqlx::query(
+                "insert into cell_todo (mcc, mnc, tac_id, cell_id) \
+                 values ($1, $2, $3, $4) on conflict do nothing",
+            )
+            .bind(mcc)
+            .bind(mnc)
+            .bind(tac_id)
+            .bind(cell_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    for (mcc, mnc, tac_id, cell_id) in &queried {
+        sqlx::query(
+            "delete from cell_todo where mcc=$1 and mnc=$2 and tac_id=$3 and cell_id=$4",
+        )
+        .bind(mcc)
+        .bind(mnc)
+        .bind(tac_id)
+        .bind(cell_id)
         .execute(&mut *tx)
         .await?;
     }
