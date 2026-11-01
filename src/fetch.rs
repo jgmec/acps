@@ -41,10 +41,10 @@ impl AppleWPSClient {
         payload.extend("com.apple.locationd".as_bytes());
         payload.extend([0x00, 0x0a]);
         payload.extend("17.5.21F79".as_bytes());
-        payload.extend([0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]);
+        payload.extend([0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
 
-        // request
-        x.encode_length_delimited(&mut payload)?;
+        // request: u16 big-endian length followed by the message
+        payload.extend(u16::try_from(x.encoded_len())?.to_be_bytes());
         x.encode(&mut payload)?;
 
         let resp = retry_fn(|| {
@@ -74,7 +74,11 @@ impl AppleWPSClient {
         .retries(5)
         .await?;
 
-        Ok(AppleWLoc::decode(&resp.bytes().await?[10..])?)
+        let body = resp.bytes().await?;
+        if body.len() < 10 {
+            bail!("response too short: {} bytes", body.len());
+        }
+        Ok(AppleWLoc::decode(&body[10..])?)
     }
 
     pub async fn query_wifi(&self, mac: MacAddress) -> Result<Vec<(MacAddress, Option<Location>)>> {
@@ -94,17 +98,15 @@ impl AppleWPSClient {
                 Ok(x) => x,
                 Err(_) => bail!("Failed to parse mac: {}", x.bssid),
             };
-            let loc = Location::from_raw(
-                x.location
-                    .expect("response uses (-180, -180) to represent not found"),
-            );
+            // not found is usually (-180, -180), but treat a missing location the same way
+            let loc = x.location.and_then(Location::from_raw);
             output.push((MacAddress::new(mac.0), loc));
         }
         Ok(output)
     }
 
     pub async fn query_cell(&self, cell: CellTower) -> Result<Vec<(CellTower, Option<Location>)>> {
-        println!("Deserialized: {:?}", cell);
+        debug!("querying cell: {:?}", cell);
 
         let x = self
             .query(AppleWLoc {
@@ -113,10 +115,7 @@ impl AppleWPSClient {
 
         let mut output = Vec::new();
         for x in x.cell_tower_response {
-            output.push((x, Location::from_raw(
-                x.location
-                    .expect("response uses (-180, -180) to represent not found"),
-            )));
+            output.push((x, x.location.and_then(Location::from_raw)));
         }
         Ok(output)
     }

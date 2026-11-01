@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git log *)",
+      "Bash(SQLX_OFFLINE=true cargo check)",
+      "Bash(SQLX_OFFLINE=true cargo clippy)",
+      "Bash(git check-ignore *)",
+      "Bash(SQLX_OFFLINE=true cargo build)",
+      "Bash(./target/debug/wtfps cell *)",
+      "Bash(./target/debug/wtfps query *)",
+      "Bash(git stash *)",
+      "Bash(SQLX_OFFLINE=true cargo build -q)",
+      "Bash(which docker *)",
+      "Bash(docker run *)",
+      "Bash(docker exec *)",
+      "Bash(break)",
+      "Bash(cp src/main.rs /tmp/main_bak.rs)",
+      "Bash(sed -i 's|print!\\(\"cellid {}\", cell.cell_id\\);|print!\\(\"{:?}\", cell\\);|' src/main.rs)",
+      "Bash(export DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/wtfps)",
+      "Bash(./target/debug/wtfps explore *)"
+    ]
+  }
+}
