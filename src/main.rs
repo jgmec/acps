@@ -56,6 +56,19 @@ enum Command {
     Oui {
         oui: String,
     },
+    /// Write an HTML map estimating the coverage of a crawled cell
+    Heatmap {
+        mcc: i32,
+        mnc: i32,
+        tac_id: i32,
+        cell_id: i64,
+        /// include same-operator cells within this distance
+        #[arg(long, default_value_t = 15.0)]
+        radius_km: f64,
+        /// output file [default: cell-<mcc>-<mnc>-<tac>-<cell>.html]
+        #[arg(long)]
+        out: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -210,6 +223,17 @@ async fn main() -> Result<()> {
 
         }
 
+        Command::Heatmap { mcc, mnc, tac_id, cell_id, radius_km, out } => {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&dotenvy::var("DATABASE_URL")?)
+                .await?;
+            let path = out.unwrap_or_else(|| format!("cell-{mcc}-{mnc}-{tac_id}-{cell_id}.html"));
+            let neighbours =
+                write_heatmap(&pool, (mcc, mnc, tac_id, cell_id), radius_km, &path).await?;
+            println!("wrote {path} ({neighbours} nearby cells)");
+        }
+
         Command::Oui { oui } => {
             for i in 0..256u64.pow(3) {
                 println!("{oui}{i:06x}");
@@ -311,6 +335,11 @@ fn cell_key(cell: &CellTower) -> CellKey {
         cell.tac_id as i32,
         cell.cell_id as i64,
     )
+}
+
+/// EARFCN / PCI as reported by Apple; u32::MAX (-1) means unknown
+fn radio_value(value: Option<u32>) -> Option<i32> {
+    value.filter(|&v| v != u32::MAX).and_then(|v| i32::try_from(v).ok())
 }
 
 fn cell_area(lat: f64, lon: f64) -> Result<i64> {
@@ -445,7 +474,11 @@ async fn commit_cells(
         }
         match loc {
             Some(loc) => {
-                found.insert(cell_key(&cell), loc);
+                // the same cell can appear in several replies; keep any radio details seen
+                let (earfcn, pci) = (radio_value(cell.uarfcn), radio_value(cell.pid));
+                let entry = found.entry(cell_key(&cell)).or_insert((loc, None, None));
+                entry.1 = earfcn.or(entry.1);
+                entry.2 = pci.or(entry.2);
             }
             None => {
                 not_found.insert(cell_key(&cell));
@@ -460,7 +493,8 @@ async fn commit_cells(
     let mut areas = BTreeSet::new();
     let (mut mccs, mut mncs, mut tacs, mut cell_ids) = (vec![], vec![], vec![], vec![]);
     let (mut lats, mut lons, mut accs, mut cell_areas) = (vec![], vec![], vec![], vec![]);
-    for (&key @ (mcc, mnc, tac_id, cell_id), loc) in &found {
+    let (mut earfcns, mut pcis) = (vec![], vec![]);
+    for (&key @ (mcc, mnc, tac_id, cell_id), (loc, earfcn, pci)) in &found {
         let area = cell_area(loc.lat, loc.lon)?;
         areas.insert((mcc, mnc, area));
         if queried.contains(&key) {
@@ -474,6 +508,8 @@ async fn commit_cells(
         lons.push(loc.lon);
         accs.push(loc.acc);
         cell_areas.push(area);
+        earfcns.push(*earfcn);
+        pcis.push(*pci);
     }
     areas.extend(crawled.iter().copied());
 
@@ -486,16 +522,25 @@ async fn commit_cells(
 
     let mut tx = pool.begin().await?;
 
-    // cells stored before areas were tracked get their area and accuracy on the next sighting
+    // cells stored before areas were tracked get their area and accuracy on the next sighting;
+    // known cells keep their position but pick up EARFCN / PCI when a reply includes them
     sqlx::query(
-        "insert into cell (mcc, mnc, tac_id, cell_id, geom, acc, crawl_area) \
-         select mcc, mnc, tac_id, cell_id, ST_SetSRID(ST_MakePoint(lon, lat), 4326), acc, area \
+        "insert into cell (mcc, mnc, tac_id, cell_id, geom, acc, crawl_area, earfcn, pci) \
+         select mcc, mnc, tac_id, cell_id, ST_SetSRID(ST_MakePoint(lon, lat), 4326), acc, area, \
+                earfcn, pci \
          from unnest($1::integer[], $2::integer[], $3::integer[], $4::bigint[], \
-                     $5::float8[], $6::float8[], $7::bigint[], $8::bigint[]) \
-             as t(mcc, mnc, tac_id, cell_id, lat, lon, acc, area) \
-         on conflict (mcc, mnc, tac_id, cell_id) do update \
-             set geom = excluded.geom, acc = excluded.acc, crawl_area = excluded.crawl_area \
-             where cell.crawl_area is null",
+                     $5::float8[], $6::float8[], $7::bigint[], $8::bigint[], \
+                     $9::integer[], $10::integer[]) \
+             as t(mcc, mnc, tac_id, cell_id, lat, lon, acc, area, earfcn, pci) \
+         on conflict (mcc, mnc, tac_id, cell_id) do update set \
+             geom = case when cell.crawl_area is null then excluded.geom else cell.geom end, \
+             acc = case when cell.crawl_area is null then excluded.acc else cell.acc end, \
+             crawl_area = coalesce(cell.crawl_area, excluded.crawl_area), \
+             earfcn = coalesce(excluded.earfcn, cell.earfcn), \
+             pci = coalesce(excluded.pci, cell.pci) \
+         where cell.crawl_area is null \
+            or excluded.earfcn is distinct from cell.earfcn and excluded.earfcn is not null \
+            or excluded.pci is distinct from cell.pci and excluded.pci is not null",
     )
     .bind(&mccs)
     .bind(&mncs)
@@ -505,6 +550,8 @@ async fn commit_cells(
     .bind(&lons)
     .bind(&accs)
     .bind(&cell_areas)
+    .bind(&earfcns)
+    .bind(&pcis)
     .execute(&mut *tx)
     .await?;
 
@@ -822,6 +869,64 @@ async fn backfill_cell_areas(pool: &PgPool) -> Result<()> {
 
         info!("backfilled crawl areas for {} cells", rows.len());
     }
+}
+
+const HEATMAP_TEMPLATE: &str = include_str!("heatmap.html");
+/// the page models every cell for every pixel, so keep the nearest ones only
+const HEATMAP_MAX_CELLS: i64 = 800;
+
+/// Write a self-contained HTML coverage map for one cell, embedding it and the nearest
+/// cells of the same operator. Returns the number of nearby cells included.
+async fn write_heatmap(pool: &PgPool, key: CellKey, radius_km: f64, path: &str) -> Result<usize> {
+    let (mcc, mnc, tac_id, cell_id) = key;
+    type Row = (i32, i64, f64, f64, Option<i64>, Option<i32>, Option<i32>, String);
+    let rows: Vec<Row> = sqlx::query_as(
+        "with t as (select geom from cell \
+                    where mcc = $1 and mnc = $2 and tac_id = $3 and cell_id = $4) \
+         select c.tac_id, c.cell_id, ST_Y(c.geom::geometry), ST_X(c.geom::geometry), c.acc, \
+                c.earfcn, c.pci, to_char(now(), 'YYYY-MM-DD HH24:MI TZ') \
+         from cell c, t \
+         where c.mcc = $1 and c.mnc = $2 and ST_DWithin(c.geom, t.geom, $5) \
+         order by ST_Distance(c.geom, t.geom), c.cell_id \
+         limit $6",
+    )
+    .bind(mcc)
+    .bind(mnc)
+    .bind(tac_id)
+    .bind(cell_id)
+    .bind(radius_km * 1000.0)
+    .bind(HEATMAP_MAX_CELLS)
+    .fetch_all(pool)
+    .await?;
+
+    let cell_json = |&(tac_id, cell_id, lat, lon, acc, earfcn, pci, _): &Row| {
+        json!({
+            "mcc": mcc, "mnc": mnc, "tac_id": tac_id, "cell_id": cell_id,
+            "lat": lat, "lon": lon, "acc": acc, "earfcn": earfcn, "pci": pci,
+        })
+    };
+    let Some(target) = rows.iter().find(|r| (r.0, r.1) == (tac_id, cell_id)) else {
+        anyhow::bail!(
+            "cell {mcc}/{mnc}/{tac_id}/{cell_id} is not in the database; \
+             add it to cell_todo and run `explore cell` first"
+        );
+    };
+    let neighbours: Vec<_> = rows
+        .iter()
+        .filter(|r| (r.0, r.1) != (tac_id, cell_id))
+        .map(cell_json)
+        .collect();
+    let data = json!({
+        "target": cell_json(target),
+        "cells": neighbours,
+        "generated": target.7,
+    });
+
+    // the JSON goes inside a <script> element
+    let data = data.to_string().replace("</", "<\\/");
+    let html = HEATMAP_TEMPLATE.replacen("/*DATA*/null", &data, 1);
+    std::fs::write(path, html)?;
+    Ok(neighbours.len())
 }
 
 fn osm(Location { lat, lon, .. }: &Location) -> String {

@@ -108,6 +108,24 @@ select count(*) from cell_site where probed_at is null;
 select count(*), count(*) filter (where found) from cell_probe;
 ```
 
+For each cell wtfps also stores the LTE channel (`earfcn`) and physical cell ID (`pci`) when Apple reports them; Apple reports them for neighbouring cells but not for the cell you query. Cells crawled before these columns existed pick them up when they appear in a later reply.
+
+### `heatmap`
+
+Writes a self-contained HTML map estimating where a crawled cell is likely to serve phones:
+
+```
+$ wtfps heatmap 452 4 38211 209991683
+wrote cell-452-4-38211-209991683.html (285 nearby cells)
+```
+
+Open the file in a browser. It shows the cell, its accuracy circle, and the nearest cells of the same operator (up to 800 within `--radius-km`, default 15), with two views:
+
+- **Serving likelihood**: the chance this cell is the strongest of its operator at each spot.
+- **Relative signal**: this cell's modelled signal above the edge of coverage, ignoring other cells.
+
+The coverage is a model, not a measurement: signal falls off with distance, and a phone uses the strongest cell on its frequency, allowing for random variation from buildings and terrain. By default the cell only competes with cells on its own EARFCN, because operators run several frequency layers over the same area. Sliders adjust the path-loss exponent, signal variation, accuracy weight and maximum range; the page explains each one. The cell must already be in the database (crawl it with `explore cell` first). The map loads MapLibre and the OpenFreeMap basemap from the internet; the cell data is embedded in the file.
+
 #### Testing the cell crawler with Docker
 
 You don't need a local Postgres or the SQLx CLI to try the crawler; wtfps creates and updates its tables itself on startup. The `postgis/postgis` image provides Postgres with PostGIS, and `psql` runs inside the container.
