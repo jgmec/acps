@@ -70,56 +70,93 @@ pub struct Coverage {
     pub reach_m: f64,
 }
 
-/// `cells[0]` is the target; the rest are the cells it competes with.
-pub fn compute(cells: &[ModelCell], params: &Params) -> Result<Coverage> {
-    let target = &cells[0];
-    let m_lon = METRES_PER_DEGREE * target.lat.to_radians().cos();
-    let to_xy = |lat: f64, lon: f64| ((lon - target.lon) * m_lon, (lat - target.lat) * METRES_PER_DEGREE);
+/// The model set up for one target: competitor positions in metres around the target and
+/// the constants of the received-power logit. `cells[0]` is the target.
+struct Model {
+    target_lat: f64,
+    target_lon: f64,
+    m_lon: f64,
+    xy: Vec<(f64, f64)>,
+    blur2: Vec<f64>,
+    k: f64,
+    temperature: f64,
+    p_edge: f64,
+    range_m: f64,
+    target_reach_m: Option<f64>,
+    /// half-width of the modelled area around the target
+    extent: f64,
+}
 
-    let xy: Vec<(f64, f64)> = cells.iter().map(|c| to_xy(c.lat, c.lon)).collect();
-    let blur2: Vec<f64> = cells
-        .iter()
-        .map(|c| {
-            let acc = c.acc.filter(|&a| a > 0).map_or(DEFAULT_ACC_M, |a| a as f64);
-            (params.acc_weight * acc).powi(2)
-        })
-        .collect();
+impl Model {
+    fn new(cells: &[ModelCell], params: &Params) -> Self {
+        let target = &cells[0];
+        let m_lon = METRES_PER_DEGREE * target.lat.to_radians().cos();
+        let mut model = Model {
+            target_lat: target.lat,
+            target_lon: target.lon,
+            m_lon,
+            xy: vec![],
+            blur2: cells
+                .iter()
+                .map(|c| {
+                    let acc = c.acc.filter(|&a| a > 0).map_or(DEFAULT_ACC_M, |a| a as f64);
+                    (params.acc_weight * acc).powi(2)
+                })
+                .collect(),
+            k: 10.0 * params.path_loss / LN_10,
+            temperature: params.sigma_db * 6f64.sqrt() / PI,
+            p_edge: 0.0,
+            range_m: 0.0,
+            target_reach_m: params
+                .use_reach
+                .then(|| target.reach.filter(|&r| r > 0).map(|r| r as f64))
+                .flatten(),
+            extent: 0.0,
+        };
+        model.xy = cells.iter().map(|c| model.to_xy(c.lat, c.lon)).collect();
+        model.range_m = params
+            .range_m
+            .unwrap_or_else(|| (4.0 * typical_spacing(&model.xy)).clamp(1500.0, 15000.0));
+        let fade = model.target_reach_m.unwrap_or(model.range_m);
+        model.p_edge = -model.k * fade.ln();
+        model.extent = (fade * 1.2).clamp(1500.0, 15000.0);
+        model
+    }
 
-    let range_m = params
-        .range_m
-        .unwrap_or_else(|| (4.0 * typical_spacing(&xy)).clamp(1500.0, 15000.0));
-    let k = 10.0 * params.path_loss / LN_10;
-    let temperature = params.sigma_db * 6f64.sqrt() / PI;
+    fn to_xy(&self, lat: f64, lon: f64) -> (f64, f64) {
+        ((lon - self.target_lon) * self.m_lon, (lat - self.target_lat) * METRES_PER_DEGREE)
+    }
 
-    let target_reach_m = params
-        .use_reach
-        .then(|| target.reach.filter(|&r| r > 0).map(|r| r as f64))
-        .flatten();
-    let p_edge = -k * target_reach_m.unwrap_or(range_m).ln();
-
-    let mut power = vec![0.0; cells.len()];
-    let mut evaluate = |x: f64, y: f64| {
-        let mut max = p_edge;
+    /// (target likelihood, target signal above the edge in dB, index of the most likely
+    /// server, its likelihood) at (x, y); `power` is scratch space, one slot per cell
+    fn evaluate(&self, x: f64, y: f64, power: &mut [f64]) -> (f64, f64, usize, f64) {
+        let mut max = self.p_edge;
         let mut best = 0;
-        for (j, &(cx, cy)) in xy.iter().enumerate() {
-            let d2 = (x - cx).powi(2) + (y - cy).powi(2) + blur2[j] + 1.0;
-            power[j] = -0.5 * k * d2.ln();
+        for (j, &(cx, cy)) in self.xy.iter().enumerate() {
+            let d2 = (x - cx).powi(2) + (y - cy).powi(2) + self.blur2[j] + 1.0;
+            power[j] = -0.5 * self.k * d2.ln();
             if power[j] > power[best] {
                 best = j;
             }
             max = max.max(power[j]);
         }
-        let sum: f64 = ((p_edge - max) / temperature).exp()
-            + power.iter().map(|p| ((p - max) / temperature).exp()).sum::<f64>();
-        let share = |p: f64| ((p - max) / temperature).exp() / sum;
-        (share(power[0]), power[0] - p_edge, best, share(power[best]))
-    };
+        let t = self.temperature;
+        let sum: f64 =
+            ((self.p_edge - max) / t).exp() + power.iter().map(|p| ((p - max) / t).exp()).sum::<f64>();
+        let share = |p: f64| ((p - max) / t).exp() / sum;
+        (share(power[0]), power[0] - self.p_edge, best, share(power[best]))
+    }
+}
+
+/// `cells[0]` is the target; the rest are the cells it competes with.
+pub fn compute(cells: &[ModelCell], params: &Params) -> Result<Coverage> {
+    let model = Model::new(cells, params);
+    let mut power = vec![0.0; cells.len()];
 
     // every hexagon whose centre lies within the modelled extent around the target
-    let extent = (target_reach_m.unwrap_or(range_m) * 1.2).clamp(1500.0, 15000.0);
     let spacing = params.resolution.edge_length_m() * 3f64.sqrt();
-    let rings = (extent / spacing).ceil() as u32 + 1;
-    let centre = LatLng::new(target.lat, target.lon)?.to_cell(params.resolution);
+    let rings = (model.extent / spacing).ceil() as u32 + 1;
+    let centre = LatLng::new(model.target_lat, model.target_lon)?.to_cell(params.resolution);
 
     let mut fine = params.resolution;
     for _ in 0..SUMMARY_REFINE {
@@ -128,36 +165,75 @@ pub fn compute(cells: &[ModelCell], params: &Params) -> Result<Coverage> {
 
     let mut coverage = Coverage {
         hexes: vec![],
-        range_m,
-        target_reach_m,
+        range_m: model.range_m,
+        target_reach_m: model.target_reach_m,
         area_km2: 0.0,
         reach_m: 0.0,
     };
     for index in centre.grid_disk::<Vec<_>>(rings) {
         let ll = LatLng::from(index);
-        let (x, y) = to_xy(ll.lat(), ll.lng());
-        let distance = x.hypot(y);
-        if distance > extent {
+        let (x, y) = model.to_xy(ll.lat(), ll.lng());
+        if x.hypot(y) > model.extent {
             continue;
         }
-        let (likelihood, signal_db, best, best_likelihood) = evaluate(x, y);
+        let (likelihood, signal_db, best, best_likelihood) = model.evaluate(x, y, &mut power);
         // hexagons this unlikely have no sub-hexagon above 50%, so skip refining them
-        if likelihood >= MIN_LIKELIHOOD {
-            for child in index.children(fine) {
-                let ll = LatLng::from(child);
-                let (cx, cy) = to_xy(ll.lat(), ll.lng());
-                let (child_likelihood, ..) = evaluate(cx, cy);
-                if child_likelihood > 0.5 {
-                    coverage.area_km2 += child.area_m2() / 1e6;
-                    coverage.reach_m = coverage.reach_m.max(cx.hypot(cy));
-                }
+        if likelihood < MIN_LIKELIHOOD {
+            continue;
+        }
+        for child in index.children(fine) {
+            let ll = LatLng::from(child);
+            let (cx, cy) = model.to_xy(ll.lat(), ll.lng());
+            if model.evaluate(cx, cy, &mut power).0 > 0.5 {
+                coverage.area_km2 += child.area_m2() / 1e6;
+                coverage.reach_m = coverage.reach_m.max(cx.hypot(cy));
             }
         }
-        if likelihood >= MIN_LIKELIHOOD {
-            coverage.hexes.push(Hex { index, likelihood, signal_db, best, best_likelihood });
-        }
+        coverage.hexes.push(Hex { index, likelihood, signal_db, best, best_likelihood });
     }
     Ok(coverage)
+}
+
+/// Largest contour grid, per side; coarser steps are used for very large areas.
+const MAX_GRID: usize = 600;
+
+/// Likelihood bands between consecutive `levels` (0..1, ascending), traced on a regular
+/// grid at least `step_m` fine over the modelled square. Each band is a set of polygons
+/// in longitude / latitude; the last band runs from the highest level up to 100%.
+pub fn likelihood_bands(
+    cells: &[ModelCell],
+    params: &Params,
+    levels: &[f64],
+    step_m: f64,
+) -> Result<Vec<contour::Band>> {
+    let model = Model::new(cells, params);
+    let mut power = vec![0.0; cells.len()];
+    let side = ((2.0 * model.extent / step_m).ceil() as usize + 1).clamp(2, MAX_GRID);
+    let step = 2.0 * model.extent / (side - 1) as f64;
+
+    // row-major, first row southernmost
+    let mut values = Vec::with_capacity(side * side);
+    for row in 0..side {
+        let y = -model.extent + row as f64 * step;
+        for col in 0..side {
+            let x = -model.extent + col as f64 * step;
+            values.push(model.evaluate(x, y, &mut power).0);
+        }
+    }
+
+    // the contour crate centres value i on [i, i + 1], so shift the origin half a step
+    let (dlon, dlat) = (step / model.m_lon, step / METRES_PER_DEGREE);
+    let west = model.target_lon - model.extent / model.m_lon;
+    let south = model.target_lat - model.extent / METRES_PER_DEGREE;
+    let mut thresholds = levels.to_vec();
+    thresholds.push(1.0 + 1e-9);
+    let bands = contour::ContourBuilder::new(side, side, true)
+        .x_origin(west - dlon / 2.0)
+        .y_origin(south - dlat / 2.0)
+        .x_step(dlon)
+        .y_step(dlat)
+        .isobands(&values, &thresholds)?;
+    Ok(bands.into_iter().filter(|b| !b.geometry().0.is_empty()).collect())
 }
 
 /// Median distance from each of the nearest cells to its nearest other cell, ignoring

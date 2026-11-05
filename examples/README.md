@@ -45,6 +45,18 @@ By default the model fades every cell out at one shared maximum range (4× the t
 
 Using field 12 as each cell's *strength* was tried first and rejected: a few cells have values above 40 km, and treated as strength they outshout nearby cells everywhere, so the Kon Tum cell vanished entirely. The option therefore only uses the cell's own value, for where it fades out; competition between cells stays distance-based.
 
+## Contour lines on the HTML map
+
+![Contour lines on the HTML maps](contour-lines.png)
+
+The HTML maps draw contour lines over the heat: 10, 25, 50, 75 and 90% likelihood, or every 5 dB in the relative signal view. The thicker 50% line is where the cell becomes the most likely server. The lines follow the sliders, and the "Contour lines" checkbox hides them.
+
+## Contour bands
+
+![The Da Nang cell on the HTML map and as GeoJSON contour bands](contours-comparison.png)
+
+[`cell-452-1-36003-30883339-contours.geojson`](cell-452-1-36003-30883339-contours.geojson) is the Da Nang cell written with `--contours`: smooth likelihood bands (10–25%, 25–50%, 50–75%, 75–90% and 90–100%) instead of hexagons, at about a third of the size. The bands at 50% and above add up to 0.193 km², matching the 0.192 km² summary. The faint haze over the sea on the HTML map is below 10%, so it has no band; `--contour-levels 0.02,0.1,0.25,0.5,0.75,0.9` adds one.
+
 ## Viewing
 
 - **HTML**: open the file in any browser. It needs internet access for the map library and the basemap; the cell data is inside the file. Sliders change the model live; hover anywhere for the values at that spot.
@@ -66,5 +78,9 @@ wtfps heatmap 452 1 36003 30883339 --geojson --out examples/cell-452-1-36003-308
 ```
 
 Add `--use-unknown-12` to the `--geojson` commands for the field 12 variant.
+
+```sh
+wtfps heatmap 452 1 36003 30883339 --geojson --contours --out examples/cell-452-1-36003-30883339-contours.geojson
+```
 
 The results change as the crawler finds more cells and fills in their frequencies.

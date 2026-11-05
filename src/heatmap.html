@@ -6,6 +6,8 @@
 <title>Cell coverage estimate</title>
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.1.3/dist/maplibre-gl.css">
 <script src="https://unpkg.com/maplibre-gl@4.1.3/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/d3-array@3.2.4/dist/d3-array.min.js"></script>
+<script src="https://unpkg.com/d3-contour@4.0.2/dist/d3-contour.min.js"></script>
 <style>
 .viz-root {
   color-scheme: light;
@@ -109,6 +111,7 @@ h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
 .legend .keys { display: flex; gap: 14px; margin-top: 8px; }
 .legend .key { display: flex; align-items: center; gap: 6px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 0 2px var(--surface-1); }
+.line-key { width: 14px; height: 0; border-top: 1.5px solid var(--text-secondary); }
 .ring { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--target); }
 .tooltip {
   position: absolute;
@@ -157,6 +160,7 @@ th { color: var(--text-secondary); font-weight: 500; }
     <label>Accuracy weight <output id="k-out"></output><input id="k" type="range" min="0" max="1" step="0.05" value="0"></label>
     <label>Max range (km) <output id="range-out"></output><input id="range" type="range" min="0.5" max="20" step="0.1"></label>
     <label style="flex-direction:row;align-items:center"><input type="checkbox" id="same-freq" checked> <span id="same-freq-label"></span></label>
+    <label style="flex-direction:row;align-items:center"><input type="checkbox" id="contours" checked> Contour lines</label>
     <label style="flex-direction:row;align-items:center"><input type="checkbox" id="use-reach"> <span id="use-reach-label">Fade out at this cell's reach from Apple's field 12 (experimental)</span></label>
   </div>
 
@@ -170,6 +174,7 @@ th { color: var(--text-secondary); font-weight: 500; }
         <span class="key"><span class="dot" style="background:var(--target)"></span>this cell</span>
         <span class="key"><span class="ring"></span>its accuracy</span>
         <span class="key"><span class="dot" style="background:var(--cell)"></span>competing cells</span>
+        <span class="key" id="contour-key"><span class="line-key"></span><span id="contour-key-label"></span></span>
         <span class="key" id="other-freq-key"><span class="dot" style="background:var(--muted)"></span>other frequencies</span>
       </div>
     </div>
@@ -179,7 +184,7 @@ th { color: var(--text-secondary); font-weight: 500; }
   <details>
     <summary>Table: this cell and the nearest cells of the same operator</summary>
     <table>
-      <thead><tr><th>Cell ID</th><th>TAC</th><th>Site</th><th>Sector</th><th>EARFCN</th><th>Band</th><th>PCI</th><th>Distance (m)</th><th>Accuracy (m)</th><th>Latitude</th><th>Longitude</th></tr></thead>
+      <thead><tr><th>Cell ID</th><th>TAC</th><th>Site</th><th>Sector</th><th>EARFCN</th><th>Band</th><th>PCI</th><th>Distance (m)</th><th>Accuracy (m)</th><th>Latitude</th><th>Longitude</th><th>Crawled (UTC)</th></tr></thead>
       <tbody id="table-body"></tbody>
     </table>
   </details>
@@ -351,6 +356,7 @@ function render() {
   const ctx = canvas.getContext("2d");
   const img = ctx.createImageData(GRID, GRID);
   const step = 2 * extent / GRID;
+  const values = new Float64Array(GRID * GRID);
   let area = 0, reach = 0;
   for (let row = 0; row < GRID; row++) {
     const y = extent - (row + 0.5) * step;
@@ -362,6 +368,7 @@ function render() {
         reach = Math.max(reach, Math.hypot(x, y));
       }
       const v = p.view === "share" ? r.share : r.signal / SIGNAL_DB;
+      values[row * GRID + col] = p.view === "share" ? r.share : r.signal;
       const o = (row * GRID + col) * 4;
       if (v < 0.02) continue;
       const [cr, cg, cb] = rampColor(v);
@@ -379,10 +386,39 @@ function render() {
   const source = map.getSource("heat");
   if (source) source.updateImage({ url: canvas.toDataURL(), coordinates });
   else addLayers(coordinates);
+  map.getSource("contours").setData(contourLines(values, step, p));
+  const visibility = $("contours").checked ? "visible" : "none";
+  for (const id of ["contour-lines", "contour-labels"]) map.setLayoutProperty(id, "visibility", visibility);
   if (!fitted) {
     fitted = true;
     map.fitBounds([[west, south], [east, north]], { padding: 20, animate: false });
   }
+}
+
+const SHARE_LEVELS = [0.1, 0.25, 0.5, 0.75, 0.9];
+const SIGNAL_LEVELS = [5, 10, 15, 20, 25, 30];
+
+// contour lines of the grid values, traced by d3-contour (the Rust --contours output uses its
+// port). d3 centres value i on pixel [i, i + 1], matching where the grid was sampled.
+function contourLines(values, step, p) {
+  const isShare = p.view === "share";
+  const levels = isShare ? SHARE_LEVELS : SIGNAL_LEVELS;
+  const toLngLat = ([px, py]) => {
+    const [lat, lon] = toLatLon(-extent + px * step, extent - py * step);
+    return [lon, lat];
+  };
+  const features = d3.contours().size([GRID, GRID]).thresholds(levels)(values)
+    .filter((c) => c.coordinates.length)
+    .map((c) => ({
+      type: "Feature",
+      geometry: { type: "MultiPolygon", coordinates: c.coordinates.map((poly) => poly.map((ring) => ring.map(toLngLat))) },
+      properties: {
+        label: isShare ? `${Math.round(c.value * 100)}%` : `${c.value} dB`,
+        // the 50% line is where this cell becomes the most likely server
+        major: isShare && c.value === 0.5,
+      },
+    }));
+  return { type: "FeatureCollection", features };
 }
 
 // competing cells in the cell colour, cells on other frequencies muted and smaller
@@ -407,6 +443,8 @@ function updateText(p) {
     ? "cells on the same frequency modelled nearby"
     : "same-operator cells modelled nearby";
   $("other-freq-key").style.display = $("same-freq").checked ? "" : "none";
+  $("contour-key").style.display = $("contours").checked ? "" : "none";
+  $("contour-key-label").textContent = p.view === "share" ? "contours at 10, 25, 50, 75, 90%" : "contours every 5 dB";
   styleCells();
   $("stat-reach").textContent = stats.area ? fmtKm(stats.reach) : "none";
   const isShare = p.view === "share";
@@ -451,6 +489,19 @@ function addLayers(coordinates) {
   // below the basemap's labels so place names stay readable
   const labels = map.getStyle().layers.find((l) => l.type === "symbol");
   map.addLayer({ id: "heat", type: "raster", source: "heat", paint: { "raster-resampling": "linear", "raster-fade-duration": 0 } }, labels?.id);
+  map.addSource("contours", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  map.addLayer({
+    id: "contour-lines", type: "line", source: "contours",
+    paint: { "line-color": css("--text-secondary"), "line-width": ["case", ["get", "major"], 1.5, 0.75], "line-opacity": 0.9 },
+  });
+  map.addLayer({
+    id: "contour-labels", type: "symbol", source: "contours",
+    layout: {
+      "symbol-placement": "line", "symbol-spacing": 250, "text-field": ["get", "label"],
+      "text-font": ["Noto Sans Regular"], "text-size": 11, "text-keep-upright": true,
+    },
+    paint: { "text-color": css("--text-primary"), "text-halo-color": css("--surface-1"), "text-halo-width": 1.5 },
+  });
   map.addSource("acc", { type: "geojson", data: circle(t.lat, t.lon, acc[0]) });
   map.addLayer({ id: "acc", type: "line", source: "acc", paint: { "line-color": css("--target"), "line-width": 1.5 } });
   map.addSource("hover-acc", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
@@ -528,6 +579,7 @@ map.on("mousemove", (e) => {
       [cellLabel(c)],
       [radioLabel(c)],
       [`field 12 (reach?) ${c.unknown_12 != null ? fmtKm(c.unknown_12) : "unknown"}`],
+      [`crawled ${c.crawled_at ? c.crawled_at.slice(0, 16).replace("T", " ") + " UTC" : "before crawl times were recorded"}`],
       [hits[0].properties.i === 0 ? "the cell this map is for" : `${fmtKm(c.dist)} from this cell`],
     ]);
     map.getCanvas().style.cursor = "pointer";
@@ -559,7 +611,8 @@ for (const c of cells.slice(0, 100)) {
   const tr = document.createElement("tr");
   const values = [c.cell_id, c.tac_id, site(c.cell_id), sector(c.cell_id),
                   c.earfcn ?? "unknown", c.earfcn != null ? band(c.earfcn) : "", c.pci ?? "unknown", Math.round(c.dist),
-                  c.acc != null ? Math.round(c.acc) : "unknown", c.lat.toFixed(6), c.lon.toFixed(6)];
+                  c.acc != null ? Math.round(c.acc) : "unknown", c.lat.toFixed(6), c.lon.toFixed(6),
+                  c.crawled_at ? c.crawled_at.slice(0, 16).replace("T", " ") : "unknown"];
   for (const v of values) {
     const td = document.createElement("td");
     td.textContent = String(v);

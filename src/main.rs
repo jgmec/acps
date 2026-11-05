@@ -109,6 +109,15 @@ struct ModelArgs {
     /// H3 resolution of the coverage hexagons (10: ~0.015 km², 11: ~0.002 km²)
     #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u8).range(7..=12))]
     hex_res: u8,
+    /// write smooth likelihood contour bands instead of hexagons
+    #[arg(long)]
+    contours: bool,
+    /// likelihood levels where the bands start, ascending, between 0 and 1
+    #[arg(long, value_delimiter = ',', default_values_t = [0.1, 0.25, 0.5, 0.75, 0.9])]
+    contour_levels: Vec<f64>,
+    /// spacing of the grid the contours are traced on, in metres
+    #[arg(long, default_value_t = 20.0)]
+    contour_step_m: f64,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -582,7 +591,9 @@ async fn commit_cells(
 
     // cells stored before areas were tracked get their area and accuracy on the next sighting;
     // known cells keep their position but pick up EARFCN / PCI and the undocumented fields
-    // when a reply includes them
+    // when a reply includes them. New cells get crawled_at from the column default; it's
+    // refreshed at most hourly, because the same cells come back in many replies and
+    // rewriting every row each batch would be wasteful
     sqlx::query(
         "insert into cell (mcc, mnc, tac_id, cell_id, geom, acc, crawl_area, earfcn, pci, \
                            unknown_11, unknown_12) \
@@ -600,8 +611,10 @@ async fn commit_cells(
              earfcn = coalesce(excluded.earfcn, cell.earfcn), \
              pci = coalesce(excluded.pci, cell.pci), \
              unknown_11 = coalesce(excluded.unknown_11, cell.unknown_11), \
-             unknown_12 = coalesce(excluded.unknown_12, cell.unknown_12) \
+             unknown_12 = coalesce(excluded.unknown_12, cell.unknown_12), \
+             crawled_at = current_timestamp \
          where cell.crawl_area is null \
+            or cell.crawled_at is null or cell.crawled_at < current_timestamp - interval '1 hour' \
             or excluded.earfcn is distinct from cell.earfcn and excluded.earfcn is not null \
             or excluded.pci is distinct from cell.pci and excluded.pci is not null \
             or excluded.unknown_11 is distinct from cell.unknown_11 and excluded.unknown_11 is not null \
@@ -955,6 +968,8 @@ struct NearbyCell {
     /// direction from the chosen cell, degrees clockwise from north
     bearing_deg: Option<f64>,
     unknown_12: Option<i64>,
+    /// ISO 8601 UTC; None for cells crawled before crawl times were recorded
+    crawled_at: Option<String>,
     generated: String,
 }
 
@@ -973,6 +988,7 @@ async fn write_heatmap(
                     where mcc = $1 and mnc = $2 and tac_id = $3 and cell_id = $4) \
          select c.tac_id, c.cell_id, ST_Y(c.geom::geometry) as lat, ST_X(c.geom::geometry) as lon, \
                 c.acc, c.earfcn, c.pci, c.unknown_12, ST_Distance(c.geom, t.geom) as distance_m, \
+                to_char(c.crawled_at at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') as crawled_at, \
                 degrees(ST_Azimuth(t.geom, c.geom)) as bearing_deg, \
                 to_char(now(), 'YYYY-MM-DD HH24:MI TZ') as generated \
          from cell c, t \
@@ -993,7 +1009,7 @@ async fn write_heatmap(
         json!({
             "mcc": mcc, "mnc": mnc, "tac_id": c.tac_id, "cell_id": c.cell_id,
             "lat": c.lat, "lon": c.lon, "acc": c.acc, "earfcn": c.earfcn, "pci": c.pci,
-            "unknown_12": c.unknown_12,
+            "unknown_12": c.unknown_12, "crawled_at": c.crawled_at,
         })
     };
     let is_target = |c: &&NearbyCell| (c.tac_id, c.cell_id) == (tac_id, cell_id);
@@ -1051,6 +1067,7 @@ fn cell_geojson(
             "mcc": mcc, "mnc": mnc, "tac_id": c.tac_id, "cell_id": c.cell_id,
             "site": c.cell_id >> 8, "sector": c.cell_id & 255,
             "acc_m": c.acc, "earfcn": c.earfcn, "pci": c.pci, "unknown_12": c.unknown_12,
+            "crawled_at": c.crawled_at,
         });
         if role == "nearby" {
             p["distance_m"] = json!(c.distance_m.round());
@@ -1084,10 +1101,41 @@ fn cell_geojson(
         "sigma_db": m.sigma_db,
         "acc_weight": m.acc_weight,
         "hex_res": m.hex_res,
+        "contour_levels": m.contours.then_some(&m.contour_levels),
     });
     // drawn in order: coverage underneath, then the accuracy circle, nearby cells, the cell
     let mut features = vec![];
-    for hex in &coverage.result.hexes {
+    for band in &coverage.bands {
+        let round = |v: f64| (v * 1e7).round() / 1e7;
+        let polygons: Vec<Vec<Vec<[f64; 2]>>> = band
+            .geometry()
+            .0
+            .iter()
+            .map(|p| {
+                std::iter::once(p.exterior())
+                    .chain(p.interiors())
+                    .map(|ring| ring.coords().map(|c| [round(c.x), round(c.y)]).collect())
+                    .collect()
+            })
+            .collect();
+        let (low, high) = (band.min_v(), band.max_v().min(1.0));
+        let middle = (low + high) / 2.0;
+        features.push(json!({
+            "type": "Feature",
+            "geometry": {"type": "MultiPolygon", "coordinates": polygons},
+            "properties": {
+                "role": "contour",
+                "likelihood_min": low,
+                "likelihood_max": high,
+                "label": format!("{:.0}–{:.0}%", low * 100.0, high * 100.0),
+                "fill": ramp_color(middle),
+                "fill-opacity": heat_opacity(middle),
+                "stroke-width": 0,
+                "stroke-opacity": 0,
+            },
+        }));
+    }
+    for hex in coverage.result.hexes.iter().filter(|_| !m.contours) {
         let mut ring: Vec<[f64; 2]> = hex.index.boundary().iter().map(|ll| [ll.lng(), ll.lat()]).collect();
         ring.push(ring[0]);
         let best = coverage.competitors[hex.best];
@@ -1169,6 +1217,8 @@ struct ModelledCoverage<'a> {
     competitors: Vec<&'a NearbyCell>,
     same_frequency_only: bool,
     result: coverage::Coverage,
+    /// likelihood bands, with --contours
+    bands: Vec<contour::Band>,
 }
 
 /// Run the coverage model; unless asked otherwise, the cell only competes with cells known
@@ -1197,11 +1247,25 @@ fn model_coverage<'a>(
         use_reach: model.use_unknown_12,
         resolution: Resolution::try_from(model.hex_res)?,
     };
+    let levels = &model.contour_levels;
+    if model.contours
+        && (levels.is_empty()
+            || levels.iter().any(|l| !(0.0..1.0).contains(l) || *l == 0.0)
+            || levels.windows(2).any(|w| w[0] >= w[1]))
+    {
+        anyhow::bail!("--contour-levels must be ascending values between 0 and 1, e.g. 0.1,0.5,0.9");
+    }
+    let bands = if model.contours {
+        coverage::likelihood_bands(&cells, &params, levels, model.contour_step_m.max(1.0))?
+    } else {
+        vec![]
+    };
     Ok(ModelledCoverage {
         model: model.clone(),
         same_frequency_only,
         result: coverage::compute(&cells, &params)?,
         competitors,
+        bands,
     })
 }
 

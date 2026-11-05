@@ -126,7 +126,7 @@ select count(*), count(*) filter (where found) from cell_probe;
 
 For each cell wtfps also stores the LTE channel (`earfcn`) and physical cell ID (`pci`) when Apple reports them; Apple reports them for neighbouring cells but not for the cell you query. Cells crawled before these columns existed pick them up when they appear in a later reply.
 
-Two undocumented location fields are stored too, so their meaning can be worked out from the data: `unknown_11` (about 940 for real cells, 1 for tracking-area estimates; possibly a version or age) and `unknown_12` (varies widely and tracks the accuracy; possibly a finer accuracy figure before Apple's 1414 m minimum).
+`crawled_at` records when each cell was last crawled, i.e. returned in a reply (refreshed at most hourly); cells crawled before it was added have no value. Two undocumented location fields are stored too, so their meaning can be worked out from the data: `unknown_11` (about 940 for real cells, 1 for tracking-area estimates; possibly a version or age) and `unknown_12` (varies widely and tracks the accuracy; possibly a finer accuracy figure before Apple's 1414 m minimum).
 
 ### `heatmap`
 
@@ -142,7 +142,7 @@ Open the file in a browser. It shows the cell, its accuracy circle, and the near
 - **Serving likelihood**: the chance this cell is the strongest of its operator at each spot.
 - **Relative signal**: this cell's modelled signal above the edge of coverage, ignoring other cells.
 
-The coverage is a model, not a measurement: signal falls off with distance, and a phone uses the strongest cell on its frequency, allowing for random variation from buildings and terrain. By default the cell only competes with cells on its own EARFCN, because operators run several frequency layers over the same area. Sliders adjust the path-loss exponent, signal variation, accuracy weight and maximum range; the page explains each one. The cell must already be in the database (crawl it with `explore cell` first). The map loads MapLibre and the OpenFreeMap basemap from the internet; the cell data is embedded in the file.
+The coverage is a model, not a measurement: signal falls off with distance, and a phone uses the strongest cell on its frequency, allowing for random variation from buildings and terrain. By default the cell only competes with cells on its own EARFCN, because operators run several frequency layers over the same area. Sliders adjust the path-loss exponent, signal variation, accuracy weight and maximum range; the page explains each one. Contour lines (on by default) mark 10, 25, 50, 75 and 90% likelihood, or every 5 dB in the signal view; the thicker 50% line is where the cell becomes the most likely server. They're traced in the browser with d3-contour, so they follow the sliders. The cell must already be in the database (crawl it with `explore cell` first). The map loads MapLibre, d3-contour and the OpenFreeMap basemap from the internet; the cell data is embedded in the file.
 
 See [`examples/`](examples/) for two generated maps with screenshots.
 
@@ -164,29 +164,33 @@ The GeoJSON also contains the modelled coverage, calculated by wtfps with the sa
 | `--all-frequencies` | off | compete with cells on every frequency, not just the cell's own EARFCN |
 | `--use-unknown-12` | off | experimental: fade out at the cell's own reach from Apple's field 12 instead of the shared range; see [examples](examples/README.md#comparison-fading-out-at-the-cells-own-reach-field-12) |
 | `--hex-res` | 10 | H3 resolution of the hexagons (10: ~0.015 km², 11: ~0.002 km²) |
+| `--contours` | off | write smooth likelihood contour bands instead of hexagons |
+| `--contour-levels` | 0.1,0.25,0.5,0.75,0.9 | where the bands start; the last band runs up to 100% |
+| `--contour-step-m` | 20 | spacing of the grid the contours are traced on |
+
+With `--contours`, the coverage is written as contour bands (`role: "contour"`) instead of hexagons: one MultiPolygon per band between two levels, with `likelihood_min`, `likelihood_max`, a `label` such as `"50–75%"`, and the same `fill` / `fill-opacity` styling. Bands don't overlap: each is a ring around the next, so the area where the cell is the most likely server is the sum of the bands from 50% up. The files are smaller than with hexagons and look like the HTML map's heat, except that the bands start at the lowest level (10% by default) where the map fades down to 2%; add a lower level such as `0.02` to show that faint fringe.
 
 ### `migrate`
 
 `explore` applies pending database migrations when it starts. To update the schema without crawling, run `wtfps migrate`.
 
-#### Testing the cell crawler with Docker
+#### Running the database with Docker Compose
 
-You don't need a local Postgres or the SQLx CLI to try the crawler; wtfps creates and updates its tables itself on startup. The `postgis/postgis` image provides Postgres with PostGIS, and `psql` runs inside the container.
+You don't need a local Postgres or the SQLx CLI to run the crawler; wtfps creates and updates its tables itself on startup. `docker-compose.yml` runs the `postgis/postgis` image, which provides Postgres with PostGIS, and `psql` runs inside the container. The data lives in the named volume `postgis_data`, so it survives `docker compose down`, restarts and image updates; only `docker compose down -v` deletes it. The port is bound to localhost only; set `WTFPS_DB_PORT` to use another one, and `POSTGRES_PASSWORD` to change the password.
 
 ```sh
-# 1. start a throwaway database (--rm: stopping the container deletes it and all data)
-docker run -d --rm --name wtfps-test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=wtfps \
-  -p 55432:5432 postgis/postgis:16-3.4
-export DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/wtfps
+# 1. start the database (waits until it accepts connections)
+docker compose up -d --wait
+echo 'DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/wtfps' > .env
 
 # 2. build; SQLX_OFFLINE uses the saved query metadata in .sqlx/ instead of a live database
 SQLX_OFFLINE=true cargo build --release
 
-# 3. create the tables (exits straight away because nothing is queued yet)
-./target/release/wtfps explore cell
+# 3. create the tables
+./target/release/wtfps migrate
 
 # 4. seed a cell Apple knows and start crawling
-docker exec wtfps-test psql -U postgres -d wtfps \
+docker compose exec db psql -U postgres -d wtfps \
   -c "insert into cell_todo values (284, 5, 106, 451645)"
 ./target/release/wtfps explore cell
 ```
@@ -195,10 +199,10 @@ The first run prints `extension "postgis" already exists, skipping`. That is a h
 
 The seed must be a cell Apple currently has a location for; check it first with `wtfps cell`. You can find the cell your phone is using with an app such as NetMonitor on Android, or Field Test mode (`*3001#12345#*`) on iPhone. The TAC must be correct: with a wrong TAC Apple reports the cell as not found.
 
-Watch progress from a second terminal, or open an interactive prompt with `docker exec -it wtfps-test psql -U postgres -d wtfps`:
+Watch progress from a second terminal, or open an interactive prompt with `docker compose exec db psql -U postgres -d wtfps`:
 
 ```sh
-docker exec wtfps-test psql -U postgres -d wtfps \
+docker compose exec db psql -U postgres -d wtfps \
   -c "select count(*) cells from cell" \
   -c "select count(*) filter (where found) hits, count(*) probes from cell_probe" \
   -c "select count(*) waiting_areas from cell_crawl where last_crawled is null"
@@ -226,7 +230,7 @@ where ST_DWithin(geom, ST_MakePoint(23.2774, 42.6672)::geography, 2000);
 Export all cells to CSV:
 
 ```sh
-docker exec wtfps-test psql -U postgres -d wtfps -c "\copy (select mcc, mnc, tac_id, cell_id, ST_Y(geom::geometry) lat, ST_X(geom::geometry) lon, acc from cell) to stdout csv header" > cells.csv
+docker compose exec db psql -U postgres -d wtfps -c "\copy (select mcc, mnc, tac_id, cell_id, ST_Y(geom::geometry) lat, ST_X(geom::geometry) lon, acc from cell) to stdout csv header" > cells.csv
 ```
 
 #### Stopping the crawler
@@ -243,7 +247,30 @@ The crawler also stops by itself once there are no seeds, uncrawled areas or unp
 timeout 10m ./target/release/wtfps explore cell
 ```
 
-When you're done, export anything you want to keep, then remove the test database with `docker stop wtfps-test`.
+`docker compose stop` (or `down`) stops the database and keeps the data. `docker compose down -v` deletes the volume and every crawled cell; export anything you want to keep first.
+
+#### Switching from a `docker run` container to Compose
+
+The Compose volume is named exactly `postgis_data`, so a database started with `docker run ... -v postgis_data:/var/lib/postgresql/data` is reused as is. Stop the crawler and the old container first: two servers must never use the same data directory at once.
+
+```sh
+docker stop wtfps-test            # with --rm this removes the container, not the named volume
+docker compose up -d --wait
+docker compose exec db psql -U postgres -d wtfps -c "select count(*) from cell"
+./target/release/wtfps migrate
+```
+
+To check how a container was started, run `docker inspect wtfps-test --format '{{range .Mounts}}{{.Type}} {{.Name}} -> {{.Destination}}{{"\n"}}{{end}}'`. If it shows a `volume` with a long random name instead of `postgis_data`, the data is in an anonymous volume, which `--rm` deletes when the container stops. Copy it across before stopping the container:
+
+```sh
+docker exec wtfps-test pg_dump -U postgres -Fc wtfps > wtfps.dump
+docker stop wtfps-test
+docker compose up -d --wait
+docker compose exec -T db pg_restore -U postgres -d wtfps --clean --if-exists < wtfps.dump
+docker compose exec db psql -U postgres -d wtfps -c "select count(*) from cell"
+```
+
+Keep `wtfps.dump` until you've checked the restored data.
 
 ## Development
 
@@ -254,7 +281,7 @@ If you don't have Nix setup on your system, you will need to install the followi
 - Rust
 - PostgreSQL v16 <!-- - [PostGIS](https://postgis.net/) -->
 - Protobuf: required to serialize requests for Apple's servers
-- [SQLx CLI](https://github.com/launchbadge/sqlx/tree/main/sqlx-cli#install): required to configure the database; install with `cargo install sqlx-cli --no-default-features --features rustls,postgres` (not needed for the Docker route in [Testing the cell crawler with Docker](#testing-the-cell-crawler-with-docker))
+- [SQLx CLI](https://github.com/launchbadge/sqlx/tree/main/sqlx-cli#install): required to configure the database; install with `cargo install sqlx-cli --no-default-features --features rustls,postgres` (not needed for the Docker route in [Running the database with Docker Compose](#running-the-database-with-docker-compose))
 
 SQLx attempts to validate queries using a live database when compiling the project. You can tell SQLx how to connect to your database by setting the `DATABASE_URL` environment variable, which you can add to `.env`. [DATABASE_URL docs](https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgConnectOptions.html)
 

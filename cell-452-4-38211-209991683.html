@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cell coverage estimate</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.1.3/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@4.1.3/dist/maplibre-gl.js"></script>
+<style>
+.viz-root {
+  color-scheme: light;
+  --surface-1: #fcfcfb;
+  --page: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --muted: #898781;
+  --gridline: #e1e0d9;
+  --border: rgba(11, 11, 11, 0.10);
+  --target: #eb6834;
+  --cell: #52514e;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --page: #0d0d0d;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --gridline: #2c2c2a;
+    --border: rgba(255, 255, 255, 0.10);
+    --target: #d95926;
+    --cell: #c3c2b7;
+  }
+}
+:root[data-theme="dark"] .viz-root {
+  color-scheme: dark;
+  --surface-1: #1a1a19;
+  --page: #0d0d0d;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --gridline: #2c2c2a;
+  --border: rgba(255, 255, 255, 0.10);
+  --target: #d95926;
+  --cell: #c3c2b7;
+}
+body { margin: 0; }
+.viz-root {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--page);
+  color: var(--text-primary);
+  min-height: 100vh;
+  padding: 16px 20px 32px;
+  box-sizing: border-box;
+}
+h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+.sub { margin: 0 0 16px; color: var(--text-secondary); font-size: 13px; }
+.stats { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.stat {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  min-width: 150px;
+}
+.stat .value { font-size: 22px; font-weight: 600; }
+.stat .label { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  align-items: flex-end;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.controls label { display: flex; flex-direction: column; gap: 4px; }
+.controls output { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.controls fieldset { border: 0; padding: 0; margin: 0; display: flex; gap: 12px; }
+.controls legend { padding: 0; margin-bottom: 4px; }
+.card {
+  position: relative;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+#map { height: 68vh; min-height: 420px; }
+.legend {
+  position: absolute;
+  left: 12px;
+  bottom: 28px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  z-index: 2;
+}
+.legend .title { color: var(--text-primary); margin-bottom: 6px; }
+.legend .ramp { width: 220px; height: 10px; border-radius: 2px; }
+.legend .ticks {
+  display: flex;
+  justify-content: space-between;
+  width: 220px;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.legend .keys { display: flex; gap: 14px; margin-top: 8px; }
+.legend .key { display: flex; align-items: center; gap: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 0 2px var(--surface-1); }
+.ring { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--target); }
+.tooltip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 3;
+  display: none;
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  white-space: nowrap;
+}
+.tooltip strong { color: var(--text-primary); font-size: 14px; }
+details { margin-top: 16px; font-size: 13px; }
+summary { cursor: pointer; color: var(--text-secondary); }
+table { border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 4px 10px; border-bottom: 1px solid var(--gridline); }
+th { color: var(--text-secondary); font-weight: 500; }
+.note { margin-top: 16px; font-size: 12px; color: var(--text-secondary); max-width: 900px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <h1 id="title"></h1>
+  <p class="sub" id="subtitle"></p>
+
+  <div class="stats">
+    <div class="stat"><div class="value" id="stat-area"></div><div class="label">area where this cell is the most likely server (&gt;50%)</div></div>
+    <div class="stat"><div class="value" id="stat-reach"></div><div class="label">furthest point with &gt;50% likelihood</div></div>
+    <div class="stat"><div class="value" id="stat-acc"></div><div class="label">Apple's location accuracy for this cell</div></div>
+    <div class="stat"><div class="value" id="stat-cells"></div><div class="label" id="stat-cells-label">same-operator cells modelled nearby</div></div>
+  </div>
+
+  <div class="controls">
+    <fieldset>
+      <legend>Show</legend>
+      <label style="flex-direction:row;align-items:center"><input type="radio" name="view" value="share" checked> Serving likelihood</label>
+      <label style="flex-direction:row;align-items:center"><input type="radio" name="view" value="signal"> Relative signal</label>
+    </fieldset>
+    <label>Path-loss exponent <output id="n-out"></output><input id="n" type="range" min="2" max="5" step="0.1" value="3.5"></label>
+    <label>Signal variation (dB) <output id="sigma-out"></output><input id="sigma" type="range" min="2" max="14" step="0.5" value="8"></label>
+    <label>Accuracy weight <output id="k-out"></output><input id="k" type="range" min="0" max="1" step="0.05" value="0"></label>
+    <label>Max range (km) <output id="range-out"></output><input id="range" type="range" min="0.5" max="20" step="0.1"></label>
+    <label style="flex-direction:row;align-items:center"><input type="checkbox" id="same-freq" checked> <span id="same-freq-label"></span></label>
+    <label style="flex-direction:row;align-items:center"><input type="checkbox" id="use-reach"> <span id="use-reach-label">Fade out at this cell's reach from Apple's field 12 (experimental)</span></label>
+  </div>
+
+  <div class="card">
+    <div id="map" role="img" aria-label="Map of the estimated coverage of the selected cell"></div>
+    <div class="legend">
+      <div class="title" id="legend-title"></div>
+      <div class="ramp" id="legend-ramp"></div>
+      <div class="ticks" id="legend-ticks"></div>
+      <div class="keys">
+        <span class="key"><span class="dot" style="background:var(--target)"></span>this cell</span>
+        <span class="key"><span class="ring"></span>its accuracy</span>
+        <span class="key"><span class="dot" style="background:var(--cell)"></span>competing cells</span>
+        <span class="key" id="other-freq-key"><span class="dot" style="background:var(--muted)"></span>other frequencies</span>
+      </div>
+    </div>
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+
+  <details>
+    <summary>Table: this cell and the nearest cells of the same operator</summary>
+    <table>
+      <thead><tr><th>Cell ID</th><th>TAC</th><th>Site</th><th>Sector</th><th>EARFCN</th><th>Band</th><th>PCI</th><th>Distance (m)</th><th>Accuracy (m)</th><th>Latitude</th><th>Longitude</th></tr></thead>
+      <tbody id="table-body"></tbody>
+    </table>
+  </details>
+
+  <p class="note">
+    This is a model, not a measurement. Each cell's position is Apple's estimate of where the cell is used, not the
+    tower location. Signal is modelled as falling off with distance (path-loss exponent: about 2 in open country,
+    3–4 in towns), and a phone is assumed to use whichever cell of its operator is strongest, allowing for random
+    signal variation from buildings and terrain. <em>Serving likelihood</em> is the chance this cell is the strongest at
+    a spot. <em>Relative signal</em> is this cell's modelled level above the edge of coverage, ignoring other cells.
+    Accuracy weight blurs each cell's position by its accuracy; at 0 positions are taken as exact. Max range is the
+    distance at which signal is assumed to fade out; it starts from 4× the typical spacing between nearby cells.
+    The experimental field 12 option fades this cell out at its own reach instead: an undocumented number from
+    Apple's reply that grows with the spacing between cells like a coverage radius, though its meaning is a guess.
+    Operators run several frequency layers over the same area and a phone doesn't choose between layers by
+    distance, so by default this cell only competes with cells on its own frequency (EARFCN); cells whose frequency
+    isn't known yet are left out until the crawler sees them again. Cells Apple doesn't know, or that the crawler
+    hasn't found yet, are missing from the model.
+  </p>
+</div>
+
+<script>
+"use strict";
+const DATA = {"cells":[{"acc":1414,"cell_id":209991689,"earfcn":250,"lat":14.36623668,"lon":108.02023315,"mcc":452,"mnc":4,"pci":286,"tac_id":38211,"unknown_12":677},{"acc":1414,"cell_id":209960193,"earfcn":1700,"lat":14.36752986,"lon":108.02292633,"mcc":452,"mnc":4,"pci":416,"tac_id":38211,"unknown_12":815},{"acc":1414,"cell_id":209960351,"earfcn":9360,"lat":14.36989498,"lon":108.02114105,"mcc":452,"mnc":4,"pci":415,"tac_id":38211,"unknown_12":1233},{"acc":1829,"cell_id":209960194,"earfcn":1700,"lat":14.37032413,"lon":108.02223968,"mcc":452,"mnc":4,"pci":415,"tac_id":38211,"unknown_12":1112},{"acc":1414,"cell_id":209991682,"earfcn":1700,"lat":14.36320018,"lon":108.01976776000001,"mcc":452,"mnc":4,"pci":285,"tac_id":38211,"unknown_12":647},{"acc":1414,"cell_id":209991681,"earfcn":1700,"lat":14.36420249,"lon":108.0234375,"mcc":452,"mnc":4,"pci":287,"tac_id":38211,"unknown_12":915},{"acc":3086,"cell_id":209949085,"earfcn":9360,"lat":14.36307334,"lon":108.02317047,"mcc":452,"mnc":4,"pci":40,"tac_id":38211,"unknown_12":10082},{"acc":1414,"cell_id":209960350,"earfcn":9360,"lat":14.36503505,"lon":108.02508544,"mcc":452,"mnc":4,"pci":416,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209991425,"earfcn":1700,"lat":14.37360382,"lon":108.01942443,"mcc":452,"mnc":4,"pci":458,"tac_id":38211,"unknown_12":932},{"acc":2028,"cell_id":209948928,"earfcn":1700,"lat":14.36076641,"lon":108.02254486,"mcc":452,"mnc":4,"pci":40,"tac_id":38211,"unknown_12":786},{"acc":1414,"cell_id":209960192,"earfcn":1700,"lat":14.36901283,"lon":108.02817535,"mcc":452,"mnc":4,"pci":414,"tac_id":38211,"unknown_12":2577},{"acc":1414,"cell_id":209948930,"earfcn":1700,"lat":14.35789108,"lon":108.01907348,"mcc":452,"mnc":4,"pci":39,"tac_id":38211,"unknown_12":563},{"acc":1414,"cell_id":209948929,"earfcn":1700,"lat":14.357529640000001,"lon":108.02239227,"mcc":452,"mnc":4,"pci":41,"tac_id":38211,"unknown_12":528},{"acc":1414,"cell_id":210001155,"earfcn":null,"lat":14.36113643,"lon":108.01222991,"mcc":452,"mnc":4,"pci":null,"tac_id":38211,"unknown_12":null},{"acc":12609,"cell_id":209949087,"earfcn":9360,"lat":14.35715007,"lon":108.01763153,"mcc":452,"mnc":4,"pci":39,"tac_id":38211,"unknown_12":27886},{"acc":1414,"cell_id":209929991,"earfcn":250,"lat":14.36570835,"lon":108.00952148,"mcc":452,"mnc":4,"pci":188,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210937857,"earfcn":1700,"lat":14.37771129,"lon":108.01717376,"mcc":452,"mnc":4,"pci":3,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209990657,"earfcn":1700,"lat":14.361662860000001,"lon":108.01026153000001,"mcc":452,"mnc":4,"pci":18,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210938013,"earfcn":9360,"lat":14.37830829,"lon":108.02049255,"mcc":452,"mnc":4,"pci":3,"tac_id":38211,"unknown_12":4160},{"acc":1414,"cell_id":209990659,"earfcn":1700,"lat":14.36350631,"lon":108.0090332,"mcc":452,"mnc":4,"pci":19,"tac_id":38211,"unknown_12":null},{"acc":1565,"cell_id":209971211,"earfcn":1700,"lat":14.35675048,"lon":108.02615356,"mcc":452,"mnc":4,"pci":377,"tac_id":38211,"unknown_12":6744},{"acc":1414,"cell_id":209971213,"earfcn":1700,"lat":14.355312340000001,"lon":108.02169036000001,"mcc":452,"mnc":4,"pci":376,"tac_id":38211,"unknown_12":1033},{"acc":1414,"cell_id":210001154,"earfcn":null,"lat":14.35691356,"lon":108.01322174,"mcc":452,"mnc":4,"pci":null,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209971202,"earfcn":1700,"lat":14.35532379,"lon":108.01570129,"mcc":452,"mnc":4,"pci":493,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209983491,"earfcn":1700,"lat":14.35524654,"lon":108.02488708,"mcc":452,"mnc":4,"pci":237,"tac_id":38211,"unknown_12":803},{"acc":1414,"cell_id":210010631,"earfcn":250,"lat":14.37434196,"lon":108.00957489,"mcc":452,"mnc":4,"pci":185,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210010625,"earfcn":1700,"lat":14.3750143,"lon":108.00979614,"mcc":452,"mnc":4,"pci":185,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209990658,"earfcn":null,"lat":14.36139488,"lon":108.00821685,"mcc":452,"mnc":4,"pci":null,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209971357,"earfcn":9360,"lat":14.353621480000001,"lon":108.01931762,"mcc":452,"mnc":4,"pci":494,"tac_id":38211,"unknown_12":5321},{"acc":1414,"cell_id":209971207,"earfcn":250,"lat":14.35362815,"lon":108.01904296000001,"mcc":452,"mnc":4,"pci":494,"tac_id":38211,"unknown_12":4167},{"acc":12442,"cell_id":209983509,"earfcn":1700,"lat":14.353728290000001,"lon":108.02291107,"mcc":452,"mnc":4,"pci":201,"tac_id":38211,"unknown_12":36947},{"acc":1414,"cell_id":209971212,"earfcn":1700,"lat":14.35330295,"lon":108.02288055,"mcc":452,"mnc":4,"pci":375,"tac_id":38211,"unknown_12":3505},{"acc":20876,"cell_id":209971200,"earfcn":1700,"lat":14.35302448,"lon":108.0194931,"mcc":452,"mnc":4,"pci":494,"tac_id":38211,"unknown_12":1666},{"acc":1414,"cell_id":210000643,"earfcn":1700,"lat":14.35892009,"lon":108.008255,"mcc":452,"mnc":4,"pci":220,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209983510,"earfcn":1700,"lat":14.35284519,"lon":108.02149963000001,"mcc":452,"mnc":4,"pci":202,"tac_id":38211,"unknown_12":5577},{"acc":7166,"cell_id":210010781,"earfcn":9360,"lat":14.37815284,"lon":108.01065063,"mcc":452,"mnc":4,"pci":185,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210000642,"earfcn":1700,"lat":14.35617542,"lon":108.00990295,"mcc":452,"mnc":4,"pci":219,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209989121,"earfcn":1700,"lat":14.35365486,"lon":108.01352691,"mcc":452,"mnc":4,"pci":200,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209992350,"earfcn":9360,"lat":14.36715602,"lon":108.00491333000001,"mcc":452,"mnc":4,"pci":474,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209990914,"earfcn":1700,"lat":14.380515090000001,"lon":108.02699279000001,"mcc":452,"mnc":4,"pci":418,"tac_id":38211,"unknown_12":868},{"acc":1414,"cell_id":209983516,"earfcn":250,"lat":14.3521595,"lon":108.02203369,"mcc":452,"mnc":4,"pci":202,"tac_id":38211,"unknown_12":443},{"acc":17012,"cell_id":209990913,"earfcn":1700,"lat":14.377541540000001,"lon":108.03177642,"mcc":452,"mnc":4,"pci":419,"tac_id":38211,"unknown_12":42658},{"acc":1414,"cell_id":209971358,"earfcn":9360,"lat":14.35174846,"lon":108.01583862,"mcc":452,"mnc":4,"pci":492,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209990924,"earfcn":1700,"lat":14.383815760000001,"lon":108.02021789,"mcc":452,"mnc":4,"pci":328,"tac_id":38211,"unknown_12":1321},{"acc":1414,"cell_id":209991071,"earfcn":9360,"lat":14.382786750000001,"lon":108.02683258,"mcc":452,"mnc":4,"pci":417,"tac_id":38211,"unknown_12":1837},{"acc":1414,"cell_id":209983490,"earfcn":1700,"lat":14.35030746,"lon":108.02458953,"mcc":452,"mnc":4,"pci":238,"tac_id":38211,"unknown_12":1030},{"acc":1414,"cell_id":209983489,"earfcn":1700,"lat":14.351908680000001,"lon":108.02898406,"mcc":452,"mnc":4,"pci":239,"tac_id":38211,"unknown_12":468},{"acc":1414,"cell_id":209968137,"earfcn":250,"lat":14.36450862,"lon":108.00244903000001,"mcc":452,"mnc":4,"pci":345,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209920258,"earfcn":1700,"lat":14.35815429,"lon":108.00469207,"mcc":452,"mnc":4,"pci":160,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209990921,"earfcn":250,"lat":14.38298034,"lon":108.02785491,"mcc":452,"mnc":4,"pci":417,"tac_id":38211,"unknown_12":1437},{"acc":1414,"cell_id":209989122,"earfcn":1700,"lat":14.3502922,"lon":108.01362609,"mcc":452,"mnc":4,"pci":198,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209983645,"earfcn":9360,"lat":14.35264301,"lon":108.03141021,"mcc":452,"mnc":4,"pci":239,"tac_id":38211,"unknown_12":5542},{"acc":11074,"cell_id":209991025,"earfcn":1700,"lat":14.38457393,"lon":108.02635955000001,"mcc":452,"mnc":4,"pci":422,"tac_id":38211,"unknown_12":25146},{"acc":1414,"cell_id":209990146,"earfcn":null,"lat":14.35628604,"lon":108.0045166,"mcc":452,"mnc":4,"pci":null,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209920415,"earfcn":9360,"lat":14.35903072,"lon":108.00249481,"mcc":452,"mnc":4,"pci":161,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209920375,"earfcn":250,"lat":14.35879802,"lon":108.00252532,"mcc":452,"mnc":4,"pci":163,"tac_id":38211,"unknown_12":null},{"acc":3880,"cell_id":209990923,"earfcn":1700,"lat":14.38470172,"lon":108.02849578,"mcc":452,"mnc":4,"pci":327,"tac_id":38211,"unknown_12":11903},{"acc":1414,"cell_id":209990145,"earfcn":null,"lat":14.354632370000001,"lon":108.0048294,"mcc":452,"mnc":4,"pci":null,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210001565,"earfcn":9360,"lat":14.35668563,"lon":108.00328063,"mcc":452,"mnc":4,"pci":251,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209920369,"earfcn":1700,"lat":14.358993530000001,"lon":108.00183105,"mcc":452,"mnc":4,"pci":162,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210004994,"earfcn":1700,"lat":14.38327217,"lon":108.00848388,"mcc":452,"mnc":4,"pci":90,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":83497475,"earfcn":40590,"lat":14.34813404,"lon":108.0135498,"mcc":452,"mnc":4,"pci":460,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209998088,"earfcn":250,"lat":14.36233997,"lon":108.00025177,"mcc":452,"mnc":4,"pci":63,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209998238,"earfcn":9360,"lat":14.36227989,"lon":108.00016784,"mcc":452,"mnc":4,"pci":63,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209998082,"earfcn":1700,"lat":14.36255264,"lon":108.00008392000001,"mcc":452,"mnc":4,"pci":63,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209971228,"earfcn":250,"lat":14.35243988,"lon":108.00580596,"mcc":452,"mnc":4,"pci":387,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209961490,"earfcn":250,"lat":14.34879207,"lon":108.01110839,"mcc":452,"mnc":4,"pci":84,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":83497474,"earfcn":40590,"lat":14.346661560000001,"lon":108.01680755,"mcc":452,"mnc":4,"pci":459,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209990915,"earfcn":1700,"lat":14.38472175,"lon":108.03121948,"mcc":452,"mnc":4,"pci":417,"tac_id":38211,"unknown_12":1507},{"acc":1414,"cell_id":209983499,"earfcn":1700,"lat":14.35044002,"lon":108.03283691,"mcc":452,"mnc":4,"pci":2,"tac_id":38211,"unknown_12":908},{"acc":1414,"cell_id":83537410,"earfcn":40590,"lat":14.35477638,"lon":108.00209808,"mcc":452,"mnc":4,"pci":249,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210001410,"earfcn":1700,"lat":14.35493659,"lon":108.00177764,"mcc":452,"mnc":4,"pci":249,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210001411,"earfcn":1700,"lat":14.35724353,"lon":108.00037384000001,"mcc":452,"mnc":4,"pci":250,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":83537411,"earfcn":40590,"lat":14.3572216,"lon":108.00034332,"mcc":452,"mnc":4,"pci":250,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209981955,"earfcn":1700,"lat":14.382231710000001,"lon":108.0362854,"mcc":452,"mnc":4,"pci":487,"tac_id":38211,"unknown_12":749},{"acc":1414,"cell_id":83492611,"earfcn":40590,"lat":14.34739208,"lon":108.01036834,"mcc":452,"mnc":4,"pci":445,"tac_id":38211,"unknown_12":null},{"acc":15348,"cell_id":209947071,"earfcn":null,"lat":14.345415110000001,"lon":108.02485656,"mcc":452,"mnc":4,"pci":497,"tac_id":38211,"unknown_12":null},{"acc":2774,"cell_id":209926046,"earfcn":null,"lat":14.3675003,"lon":107.9975357,"mcc":452,"mnc":4,"pci":null,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210012930,"earfcn":1700,"lat":14.34871864,"lon":108.00695037,"mcc":452,"mnc":4,"pci":313,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209930497,"earfcn":1700,"lat":14.36571311,"lon":107.99707031,"mcc":452,"mnc":4,"pci":500,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209956611,"earfcn":1700,"lat":14.34638404,"lon":108.01000213,"mcc":452,"mnc":4,"pci":445,"tac_id":38211,"unknown_12":null},{"acc":8850,"cell_id":209941919,"earfcn":9360,"lat":14.3746252,"lon":108.04244232,"mcc":452,"mnc":4,"pci":490,"tac_id":38211,"unknown_12":25334},{"acc":1414,"cell_id":209988097,"earfcn":1700,"lat":14.3492937,"lon":108.00515747,"mcc":452,"mnc":4,"pci":305,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209997826,"earfcn":null,"lat":14.35876464,"lon":107.99803924,"mcc":452,"mnc":4,"pci":null,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209997832,"earfcn":null,"lat":14.3588705,"lon":107.99790954000001,"mcc":452,"mnc":4,"pci":null,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":83536387,"earfcn":40590,"lat":14.353062620000001,"lon":108.00097656,"mcc":452,"mnc":4,"pci":454,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210006017,"earfcn":1700,"lat":14.36728096,"lon":107.99618530000001,"mcc":452,"mnc":4,"pci":45,"tac_id":38211,"unknown_12":null},{"acc":7793,"cell_id":209941953,"earfcn":3725,"lat":14.38010406,"lon":108.04022979,"mcc":452,"mnc":4,"pci":490,"tac_id":38211,"unknown_12":26981},{"acc":1414,"cell_id":209925791,"earfcn":9360,"lat":14.35729598,"lon":107.99807739,"mcc":452,"mnc":4,"pci":122,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209981954,"earfcn":1700,"lat":14.37800693,"lon":108.04186248,"mcc":452,"mnc":4,"pci":486,"tac_id":38211,"unknown_12":3013},{"acc":1414,"cell_id":83717633,"earfcn":40590,"lat":14.35545253,"lon":107.99873352,"mcc":452,"mnc":4,"pci":121,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210000406,"earfcn":1700,"lat":14.34978866,"lon":108.00234222,"mcc":452,"mnc":4,"pci":105,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210012419,"earfcn":1700,"lat":14.34737586,"lon":108.03533935,"mcc":452,"mnc":4,"pci":97,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209946891,"earfcn":1700,"lat":14.3471508,"lon":108.00517272,"mcc":452,"mnc":4,"pci":341,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":83523585,"earfcn":40590,"lat":14.345292090000001,"lon":108.00772094,"mcc":452,"mnc":4,"pci":102,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209925790,"earfcn":9360,"lat":14.35466575,"lon":107.99799346,"mcc":452,"mnc":4,"pci":120,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":84228609,"earfcn":null,"lat":14.34342384,"lon":108.01141357,"mcc":452,"mnc":4,"pci":null,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209987591,"earfcn":250,"lat":14.34511947,"lon":108.00760650000001,"mcc":452,"mnc":4,"pci":102,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":84228615,"earfcn":null,"lat":14.34342765,"lon":108.01137542000001,"mcc":452,"mnc":4,"pci":null,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209946887,"earfcn":250,"lat":14.34801959,"lon":108.00294494,"mcc":452,"mnc":4,"pci":497,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209930499,"earfcn":1700,"lat":14.36424732,"lon":107.99374389,"mcc":452,"mnc":4,"pci":499,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210006025,"earfcn":250,"lat":14.367535590000001,"lon":107.99345397,"mcc":452,"mnc":4,"pci":47,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209946882,"earfcn":1700,"lat":14.34857463,"lon":108.00108337,"mcc":452,"mnc":4,"pci":496,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209925635,"earfcn":1700,"lat":14.356771460000001,"lon":107.9951477,"mcc":452,"mnc":4,"pci":122,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209987586,"earfcn":1700,"lat":14.3453474,"lon":108.00455474,"mcc":452,"mnc":4,"pci":104,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209987742,"earfcn":9360,"lat":14.34579944,"lon":108.00325012,"mcc":452,"mnc":4,"pci":103,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":83523587,"earfcn":40590,"lat":14.34560394,"lon":108.00332641,"mcc":452,"mnc":4,"pci":104,"tac_id":38211,"unknown_12":null},{"acc":3365,"cell_id":209960706,"earfcn":1700,"lat":14.391916270000001,"lon":108.0091629,"mcc":452,"mnc":4,"pci":364,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210006019,"earfcn":1700,"lat":14.371047970000001,"lon":107.99235534,"mcc":452,"mnc":4,"pci":47,"tac_id":38211,"unknown_12":null},{"acc":3930,"cell_id":209947038,"earfcn":9360,"lat":14.34640407,"lon":108.00154876,"mcc":452,"mnc":4,"pci":495,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209946888,"earfcn":250,"lat":14.34693527,"lon":108.00089263,"mcc":452,"mnc":4,"pci":495,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":83482882,"earfcn":40590,"lat":14.34676933,"lon":108.00090789000001,"mcc":452,"mnc":4,"pci":495,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209960705,"earfcn":1700,"lat":14.39422321,"lon":108.0147171,"mcc":452,"mnc":4,"pci":363,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209988865,"earfcn":null,"lat":14.36016178,"lon":107.99266052,"mcc":452,"mnc":4,"pci":null,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209946881,"earfcn":1700,"lat":14.346482270000001,"lon":108.00091552,"mcc":452,"mnc":4,"pci":495,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209941763,"earfcn":1700,"lat":14.372831340000001,"lon":108.04827117,"mcc":452,"mnc":4,"pci":490,"tac_id":38211,"unknown_12":2960},{"acc":1414,"cell_id":209987329,"earfcn":1700,"lat":14.34837341,"lon":107.99867248,"mcc":452,"mnc":4,"pci":208,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209956876,"earfcn":1700,"lat":14.376182550000001,"lon":107.99245452,"mcc":452,"mnc":4,"pci":342,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950741,"earfcn":1700,"lat":14.339854240000001,"lon":108.02913665,"mcc":452,"mnc":4,"pci":330,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210012418,"earfcn":1700,"lat":14.343323700000001,"lon":108.03701019,"mcc":452,"mnc":4,"pci":96,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209981953,"earfcn":1700,"lat":14.38618278,"lon":108.04234313,"mcc":452,"mnc":4,"pci":488,"tac_id":38211,"unknown_12":1552},{"acc":4400,"cell_id":209987486,"earfcn":9360,"lat":14.345788,"lon":107.9993515,"mcc":452,"mnc":4,"pci":208,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950723,"earfcn":1700,"lat":14.33873558,"lon":108.03020477,"mcc":452,"mnc":4,"pci":466,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950721,"earfcn":1700,"lat":14.34053707,"lon":108.03597259,"mcc":452,"mnc":4,"pci":467,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210012417,"earfcn":1700,"lat":14.34304428,"lon":108.04050445,"mcc":452,"mnc":4,"pci":98,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209946902,"earfcn":1700,"lat":14.3433094,"lon":107.99937438,"mcc":452,"mnc":4,"pci":103,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209987695,"earfcn":1700,"lat":14.33917713,"lon":108.00233459,"mcc":452,"mnc":4,"pci":399,"tac_id":38211,"unknown_12":null},{"acc":2327,"cell_id":209941762,"earfcn":1700,"lat":14.35720348,"lon":108.05254364,"mcc":452,"mnc":4,"pci":489,"tac_id":38211,"unknown_12":5456},{"acc":1414,"cell_id":209941761,"earfcn":1700,"lat":14.3695631,"lon":108.05459594,"mcc":452,"mnc":4,"pci":491,"tac_id":38211,"unknown_12":822},{"acc":1414,"cell_id":210014220,"earfcn":1700,"lat":14.38922977,"lon":107.9931488,"mcc":452,"mnc":4,"pci":9,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209971969,"earfcn":1700,"lat":14.36322593,"lon":107.98476409,"mcc":452,"mnc":4,"pci":34,"tac_id":38211,"unknown_12":null},{"acc":8844,"cell_id":209941782,"earfcn":1700,"lat":14.366532320000001,"lon":108.05587768000001,"mcc":452,"mnc":4,"pci":226,"tac_id":38211,"unknown_12":22581},{"acc":1414,"cell_id":209950742,"earfcn":1700,"lat":14.33237171,"lon":108.02319335,"mcc":452,"mnc":4,"pci":331,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209989376,"earfcn":1700,"lat":14.339099880000001,"lon":107.99890136,"mcc":452,"mnc":4,"pci":479,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209960707,"earfcn":1700,"lat":14.400603290000001,"lon":108.00994873,"mcc":452,"mnc":4,"pci":365,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":83462656,"earfcn":40590,"lat":14.34257888,"lon":107.99383544,"mcc":452,"mnc":4,"pci":10,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209989383,"earfcn":250,"lat":14.33864116,"lon":107.99833679,"mcc":452,"mnc":4,"pci":479,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209956871,"earfcn":250,"lat":14.37684249,"lon":107.98456573,"mcc":452,"mnc":4,"pci":50,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209956877,"earfcn":1700,"lat":14.37991142,"lon":107.98556518000001,"mcc":452,"mnc":4,"pci":343,"tac_id":38211,"unknown_12":null},{"acc":3524,"cell_id":209941918,"earfcn":9360,"lat":14.34056472,"lon":108.04647827000001,"mcc":452,"mnc":4,"pci":489,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209971971,"earfcn":1700,"lat":14.35772418,"lon":107.98233795,"mcc":452,"mnc":4,"pci":35,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950728,"earfcn":250,"lat":14.334351530000001,"lon":108.04040527000001,"mcc":452,"mnc":4,"pci":465,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950722,"earfcn":1700,"lat":14.3347721,"lon":108.04151916,"mcc":452,"mnc":4,"pci":465,"tac_id":38211,"unknown_12":null},{"acc":1733,"cell_id":209950752,"earfcn":1700,"lat":14.34366893,"lon":108.05162811,"mcc":452,"mnc":4,"pci":406,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209989378,"earfcn":1700,"lat":14.335282320000001,"lon":107.99591064,"mcc":452,"mnc":4,"pci":478,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209989632,"earfcn":1700,"lat":14.33735275,"lon":107.99130249,"mcc":452,"mnc":4,"pci":189,"tac_id":38211,"unknown_12":null},{"acc":6058,"cell_id":209956639,"earfcn":1700,"lat":14.327361100000001,"lon":108.00964355,"mcc":452,"mnc":4,"pci":360,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209989377,"earfcn":1700,"lat":14.33117008,"lon":107.9993515,"mcc":452,"mnc":4,"pci":477,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209976067,"earfcn":1700,"lat":14.3329811,"lon":107.99422454,"mcc":452,"mnc":4,"pci":12,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209926657,"earfcn":1700,"lat":14.33949279,"lon":107.9870758,"mcc":452,"mnc":4,"pci":255,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210014209,"earfcn":1700,"lat":14.38389682,"lon":107.98013305,"mcc":452,"mnc":4,"pci":17,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209976065,"earfcn":1700,"lat":14.32951736,"lon":107.99604034000001,"mcc":452,"mnc":4,"pci":14,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209926658,"earfcn":1700,"lat":14.34125041,"lon":107.98243713000001,"mcc":452,"mnc":4,"pci":256,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209927682,"earfcn":1700,"lat":14.36239528,"lon":107.97358703,"mcc":452,"mnc":4,"pci":355,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950751,"earfcn":1700,"lat":14.336940760000001,"lon":108.05553436,"mcc":452,"mnc":4,"pci":407,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210014210,"earfcn":1700,"lat":14.38243675,"lon":107.97577667,"mcc":452,"mnc":4,"pci":15,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209989634,"earfcn":1700,"lat":14.33588409,"lon":107.98541259,"mcc":452,"mnc":4,"pci":191,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209992451,"earfcn":1700,"lat":14.35999965,"lon":107.97344207,"mcc":452,"mnc":4,"pci":421,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209989633,"earfcn":1700,"lat":14.33222198,"lon":107.98899078000001,"mcc":452,"mnc":4,"pci":190,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209976072,"earfcn":250,"lat":14.32912158,"lon":107.99172973,"mcc":452,"mnc":4,"pci":13,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950977,"earfcn":1700,"lat":14.32026004,"lon":108.01373291,"mcc":452,"mnc":4,"pci":320,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209927683,"earfcn":1700,"lat":14.364932060000001,"lon":107.97161102,"mcc":452,"mnc":4,"pci":356,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209976066,"earfcn":1700,"lat":14.32853794,"lon":107.99112701,"mcc":452,"mnc":4,"pci":13,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210014211,"earfcn":1700,"lat":14.389670370000001,"lon":107.97606658000001,"mcc":452,"mnc":4,"pci":16,"tac_id":38211,"unknown_12":null},{"acc":2683,"cell_id":209969409,"earfcn":1700,"lat":14.40745353,"lon":107.99233245,"mcc":452,"mnc":4,"pci":269,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950997,"earfcn":1700,"lat":14.319339750000001,"lon":108.03236389,"mcc":452,"mnc":4,"pci":71,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950979,"earfcn":1700,"lat":14.318819040000001,"lon":108.00623321,"mcc":452,"mnc":4,"pci":319,"tac_id":38211,"unknown_12":null},{"acc":10416,"cell_id":209941781,"earfcn":1700,"lat":14.36764812,"lon":108.07332611,"mcc":452,"mnc":4,"pci":227,"tac_id":38211,"unknown_12":24079},{"acc":1414,"cell_id":209991937,"earfcn":1700,"lat":14.32360935,"lon":107.99099731,"mcc":452,"mnc":4,"pci":74,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209991943,"earfcn":250,"lat":14.323471060000001,"lon":107.99070739,"mcc":452,"mnc":4,"pci":74,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950731,"earfcn":1700,"lat":14.329554550000001,"lon":108.06311035,"mcc":452,"mnc":4,"pci":85,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209991939,"earfcn":1700,"lat":14.32422065,"lon":107.98247528,"mcc":452,"mnc":4,"pci":72,"tac_id":38211,"unknown_12":null},{"acc":18766,"cell_id":209941952,"earfcn":3725,"lat":14.31421375,"lon":108.04166412000001,"mcc":452,"mnc":4,"pci":489,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209931267,"earfcn":1700,"lat":14.319263450000001,"lon":107.98818206,"mcc":452,"mnc":4,"pci":359,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209976321,"earfcn":1700,"lat":14.37574291,"lon":107.96136474000001,"mcc":452,"mnc":4,"pci":473,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950978,"earfcn":1700,"lat":14.309740060000001,"lon":108.01048278,"mcc":452,"mnc":4,"pci":318,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950998,"earfcn":1700,"lat":14.30858135,"lon":108.02814483,"mcc":452,"mnc":4,"pci":70,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950730,"earfcn":1700,"lat":14.3272171,"lon":108.06499481,"mcc":452,"mnc":4,"pci":84,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209976322,"earfcn":1700,"lat":14.370265,"lon":107.95941162,"mcc":452,"mnc":4,"pci":471,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209980940,"earfcn":1700,"lat":14.369565960000001,"lon":108.08122253,"mcc":452,"mnc":4,"pci":45,"tac_id":38211,"unknown_12":1714},{"acc":1414,"cell_id":210940930,"earfcn":1700,"lat":14.334618560000001,"lon":107.96780395,"mcc":452,"mnc":4,"pci":204,"tac_id":38211,"unknown_12":null},{"acc":13300,"cell_id":209951163,"earfcn":9360,"lat":14.30415248,"lon":108.02062225,"mcc":452,"mnc":4,"pci":8,"tac_id":38211,"unknown_12":null},{"acc":1876,"cell_id":209941772,"earfcn":1700,"lat":14.34033775,"lon":108.07862854,"mcc":452,"mnc":4,"pci":412,"tac_id":38215,"unknown_12":null},{"acc":1414,"cell_id":209941772,"earfcn":1700,"lat":14.33686542,"lon":108.07705688,"mcc":452,"mnc":4,"pci":412,"tac_id":38211,"unknown_12":null},{"acc":2177,"cell_id":209931265,"earfcn":1700,"lat":14.31121444,"lon":107.98870086000001,"mcc":452,"mnc":4,"pci":357,"tac_id":38211,"unknown_12":null},{"acc":1539,"cell_id":209931266,"earfcn":1700,"lat":14.31389904,"lon":107.98354339000001,"mcc":452,"mnc":4,"pci":358,"tac_id":38211,"unknown_12":null},{"acc":7398,"cell_id":209976320,"earfcn":1700,"lat":14.36849308,"lon":107.95283508,"mcc":452,"mnc":4,"pci":38,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209950987,"earfcn":1700,"lat":14.30109977,"lon":108.01898193,"mcc":452,"mnc":4,"pci":8,"tac_id":38211,"unknown_12":null},{"acc":6251,"cell_id":210007042,"earfcn":1700,"lat":14.414490690000001,"lon":107.97294616,"mcc":452,"mnc":4,"pci":270,"tac_id":38212,"unknown_12":null},{"acc":6976,"cell_id":209927435,"earfcn":1700,"lat":14.31358718,"lon":107.9777832,"mcc":452,"mnc":4,"pci":413,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209952001,"earfcn":1700,"lat":14.3315382,"lon":107.95845031,"mcc":452,"mnc":4,"pci":110,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209980939,"earfcn":1700,"lat":14.37156581,"lon":108.09184265,"mcc":452,"mnc":4,"pci":47,"tac_id":38211,"unknown_12":649},{"acc":3273,"cell_id":209954563,"earfcn":1700,"lat":14.301575660000001,"lon":107.99362182,"mcc":452,"mnc":4,"pci":95,"tac_id":38211,"unknown_12":null},{"acc":1981,"cell_id":209941771,"earfcn":1700,"lat":14.33409595,"lon":108.08834838,"mcc":452,"mnc":4,"pci":411,"tac_id":38215,"unknown_12":null},{"acc":1414,"cell_id":209980931,"earfcn":1700,"lat":14.37387466,"lon":108.09739685,"mcc":452,"mnc":4,"pci":463,"tac_id":38211,"unknown_12":1836},{"acc":3711,"cell_id":209942273,"earfcn":1700,"lat":14.37708377,"lon":107.94109344,"mcc":452,"mnc":4,"pci":173,"tac_id":38211,"unknown_12":null},{"acc":13079,"cell_id":209970334,"earfcn":9360,"lat":14.4414587,"lon":108.04801177,"mcc":452,"mnc":4,"pci":469,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":210008065,"earfcn":1700,"lat":14.299273490000001,"lon":107.97750091,"mcc":452,"mnc":4,"pci":266,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209954561,"earfcn":1700,"lat":14.29117107,"lon":107.99569702000001,"mcc":452,"mnc":4,"pci":94,"tac_id":38211,"unknown_12":null},{"acc":1788,"cell_id":209941771,"earfcn":1700,"lat":14.32661437,"lon":108.09082794,"mcc":452,"mnc":4,"pci":411,"tac_id":38211,"unknown_12":null},{"acc":6053,"cell_id":209970179,"earfcn":1700,"lat":14.446798320000001,"lon":108.02531433,"mcc":452,"mnc":4,"pci":468,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209952003,"earfcn":1700,"lat":14.331432340000001,"lon":107.94683837000001,"mcc":452,"mnc":4,"pci":108,"tac_id":38211,"unknown_12":null},{"acc":1978,"cell_id":209952002,"earfcn":1700,"lat":14.32367897,"lon":107.95128631,"mcc":452,"mnc":4,"pci":109,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209970368,"earfcn":3725,"lat":14.4414854,"lon":108.05446624,"mcc":452,"mnc":4,"pci":469,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209970178,"earfcn":1700,"lat":14.44354629,"lon":108.05115509000001,"mcc":452,"mnc":4,"pci":469,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":210007043,"earfcn":1700,"lat":14.43022823,"lon":107.96248626,"mcc":452,"mnc":4,"pci":271,"tac_id":38212,"unknown_12":null},{"acc":5019,"cell_id":209981119,"earfcn":3725,"lat":14.37861633,"lon":108.10640716,"mcc":452,"mnc":4,"pci":464,"tac_id":38211,"unknown_12":null},{"acc":4454,"cell_id":209980935,"earfcn":250,"lat":14.38027858,"lon":108.10690307,"mcc":452,"mnc":4,"pci":464,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209928214,"earfcn":1700,"lat":14.41248226,"lon":107.94364929,"mcc":452,"mnc":4,"pci":21,"tac_id":38212,"unknown_12":null},{"acc":4575,"cell_id":209980930,"earfcn":1700,"lat":14.38340854,"lon":108.10856628,"mcc":452,"mnc":4,"pci":462,"tac_id":38211,"unknown_12":null},{"acc":6456,"cell_id":209928223,"earfcn":1700,"lat":14.4333229,"lon":107.96066284,"mcc":452,"mnc":4,"pci":29,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209924375,"earfcn":1700,"lat":14.38505458,"lon":108.10944366,"mcc":452,"mnc":4,"pci":22,"tac_id":38211,"unknown_12":null},{"acc":7958,"cell_id":209981085,"earfcn":9360,"lat":14.38212585,"lon":108.11012268,"mcc":452,"mnc":4,"pci":464,"tac_id":38211,"unknown_12":null},{"acc":2828,"cell_id":207567773,"earfcn":9360,"lat":14.333199500000001,"lon":108.10527038000001,"mcc":452,"mnc":4,"pci":495,"tac_id":38114,"unknown_12":null},{"acc":1414,"cell_id":209978735,"earfcn":1700,"lat":14.28110504,"lon":107.99230957,"mcc":452,"mnc":4,"pci":370,"tac_id":38211,"unknown_12":null},{"acc":7510,"cell_id":209921993,"earfcn":3725,"lat":14.35241699,"lon":107.92881774,"mcc":452,"mnc":4,"pci":465,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209942274,"earfcn":1700,"lat":14.37196254,"lon":107.92765045,"mcc":452,"mnc":4,"pci":171,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209978741,"earfcn":250,"lat":14.28067398,"lon":107.99190521,"mcc":452,"mnc":4,"pci":370,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209978636,"earfcn":1700,"lat":14.27832317,"lon":108.00048065,"mcc":452,"mnc":4,"pci":271,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209924374,"earfcn":1700,"lat":14.38860607,"lon":108.11333465,"mcc":452,"mnc":4,"pci":21,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209928213,"earfcn":1700,"lat":14.42201709,"lon":107.94145965,"mcc":452,"mnc":4,"pci":23,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209978625,"earfcn":1700,"lat":14.27479839,"lon":107.99799346,"mcc":452,"mnc":4,"pci":368,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209986049,"earfcn":1700,"lat":14.3436594,"lon":107.92478179,"mcc":452,"mnc":4,"pci":429,"tac_id":38211,"unknown_12":null},{"acc":1581,"cell_id":209970177,"earfcn":1700,"lat":14.46050453,"lon":108.04296112,"mcc":452,"mnc":4,"pci":470,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209924373,"earfcn":1700,"lat":14.39249801,"lon":108.1154251,"mcc":452,"mnc":4,"pci":23,"tac_id":38211,"unknown_12":null},{"acc":4215,"cell_id":209924364,"earfcn":1700,"lat":14.394167900000001,"lon":108.11519622,"mcc":452,"mnc":4,"pci":7,"tac_id":38211,"unknown_12":null},{"acc":6099,"cell_id":209981120,"earfcn":3725,"lat":14.313666340000001,"lon":108.10279083,"mcc":452,"mnc":4,"pci":462,"tac_id":38211,"unknown_12":null},{"acc":5755,"cell_id":209942275,"earfcn":1700,"lat":14.3779602,"lon":107.92169952,"mcc":452,"mnc":4,"pci":172,"tac_id":38211,"unknown_12":null},{"acc":4267,"cell_id":207567774,"earfcn":9360,"lat":14.34868907,"lon":108.11759185,"mcc":452,"mnc":4,"pci":497,"tac_id":38114,"unknown_12":null},{"acc":1414,"cell_id":209928204,"earfcn":1700,"lat":14.43699264,"lon":107.95075225000001,"mcc":452,"mnc":4,"pci":462,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209954817,"earfcn":1700,"lat":14.33012104,"lon":107.92629241,"mcc":452,"mnc":4,"pci":165,"tac_id":38211,"unknown_12":null},{"acc":2731,"cell_id":209932565,"earfcn":1700,"lat":14.46095657,"lon":107.9888916,"mcc":452,"mnc":4,"pci":301,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209928224,"earfcn":1700,"lat":14.44313621,"lon":107.95489501,"mcc":452,"mnc":4,"pci":27,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209954818,"earfcn":1700,"lat":14.33304214,"lon":107.92351531,"mcc":452,"mnc":4,"pci":167,"tac_id":38211,"unknown_12":null},{"acc":6218,"cell_id":209927425,"earfcn":1700,"lat":14.31717109,"lon":107.93087005,"mcc":452,"mnc":4,"pci":470,"tac_id":38211,"unknown_12":null},{"acc":5908,"cell_id":209981086,"earfcn":9360,"lat":14.313686370000001,"lon":108.10815429,"mcc":452,"mnc":4,"pci":462,"tac_id":38211,"unknown_12":null},{"acc":6035,"cell_id":209980929,"earfcn":1700,"lat":14.33781051,"lon":108.11973571,"mcc":452,"mnc":4,"pci":464,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209928205,"earfcn":1700,"lat":14.43410015,"lon":107.94165802,"mcc":452,"mnc":4,"pci":463,"tac_id":38212,"unknown_12":null},{"acc":5991,"cell_id":209924540,"earfcn":9360,"lat":14.40139961,"lon":108.11946105,"mcc":452,"mnc":4,"pci":7,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209928203,"earfcn":1700,"lat":14.440930360000001,"lon":107.94686889,"mcc":452,"mnc":4,"pci":464,"tac_id":38212,"unknown_12":null},{"acc":12888,"cell_id":209932556,"earfcn":1700,"lat":14.45918941,"lon":107.9724884,"mcc":452,"mnc":4,"pci":58,"tac_id":38212,"unknown_12":null},{"acc":12559,"cell_id":209928350,"earfcn":9360,"lat":14.4476757,"lon":107.95181274000001,"mcc":452,"mnc":4,"pci":319,"tac_id":38212,"unknown_12":null},{"acc":5529,"cell_id":209986050,"earfcn":1700,"lat":14.34356403,"lon":107.91483306,"mcc":452,"mnc":4,"pci":430,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209927456,"earfcn":1700,"lat":14.305777540000001,"lon":107.93206024,"mcc":452,"mnc":4,"pci":334,"tac_id":38211,"unknown_12":null},{"acc":1637,"cell_id":209927426,"earfcn":1700,"lat":14.31117725,"lon":107.92730712000001,"mcc":452,"mnc":4,"pci":468,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":210025218,"earfcn":1700,"lat":14.313149450000001,"lon":107.92606353000001,"mcc":452,"mnc":4,"pci":396,"tac_id":38211,"unknown_12":null},{"acc":2229,"cell_id":209986059,"earfcn":1700,"lat":14.35734558,"lon":107.91105651000001,"mcc":452,"mnc":4,"pci":60,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209933845,"earfcn":1700,"lat":14.47295284,"lon":108.03536987,"mcc":452,"mnc":4,"pci":null,"tac_id":38212,"unknown_12":null},{"acc":7401,"cell_id":209985984,"earfcn":3725,"lat":14.41105651,"lon":107.92000579,"mcc":452,"mnc":4,"pci":478,"tac_id":38212,"unknown_12":null},{"acc":14463,"cell_id":209933826,"earfcn":1700,"lat":14.47348403,"lon":108.03328704,"mcc":452,"mnc":4,"pci":100,"tac_id":38212,"unknown_12":null},{"acc":6411,"cell_id":210008067,"earfcn":1700,"lat":14.278190610000001,"lon":107.9569168,"mcc":452,"mnc":4,"pci":265,"tac_id":38211,"unknown_12":null},{"acc":1421,"cell_id":209924539,"earfcn":9360,"lat":14.41081619,"lon":108.12194061,"mcc":452,"mnc":4,"pci":6,"tac_id":38211,"unknown_12":null},{"acc":1501,"cell_id":209924363,"earfcn":1700,"lat":14.413697240000001,"lon":108.12136077,"mcc":452,"mnc":4,"pci":6,"tac_id":38211,"unknown_12":null},{"acc":8635,"cell_id":209927672,"earfcn":9360,"lat":14.30376815,"lon":107.92819213,"mcc":452,"mnc":4,"pci":334,"tac_id":38211,"unknown_12":null},{"acc":2108,"cell_id":209924553,"earfcn":3725,"lat":14.4157505,"lon":108.12156677,"mcc":452,"mnc":4,"pci":6,"tac_id":38211,"unknown_12":null},{"acc":22714,"cell_id":209924369,"earfcn":250,"lat":14.41937351,"lon":108.11973571,"mcc":452,"mnc":4,"pci":6,"tac_id":38211,"unknown_12":null},{"acc":1995,"cell_id":209924510,"earfcn":9360,"lat":14.4191761,"lon":108.12036132,"mcc":452,"mnc":4,"pci":501,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209928194,"earfcn":1700,"lat":14.45324516,"lon":107.94893646,"mcc":452,"mnc":4,"pci":319,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209928200,"earfcn":250,"lat":14.4534645,"lon":107.94918823,"mcc":452,"mnc":4,"pci":319,"tac_id":38212,"unknown_12":null},{"acc":9352,"cell_id":209986051,"earfcn":1700,"lat":14.368687620000001,"lon":107.9063034,"mcc":452,"mnc":4,"pci":431,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209924354,"earfcn":1700,"lat":14.41460609,"lon":108.12324523000001,"mcc":452,"mnc":4,"pci":501,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209927427,"earfcn":1700,"lat":14.312359800000001,"lon":107.920372,"mcc":452,"mnc":4,"pci":469,"tac_id":38211,"unknown_12":null},{"acc":11705,"cell_id":209934012,"earfcn":9360,"lat":14.47893619,"lon":108.03415679,"mcc":452,"mnc":4,"pci":78,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209986060,"earfcn":1700,"lat":14.355515480000001,"lon":107.90458679,"mcc":452,"mnc":4,"pci":62,"tac_id":38211,"unknown_12":null},{"acc":2023,"cell_id":207400204,"earfcn":1700,"lat":14.28269577,"lon":108.10092926,"mcc":452,"mnc":4,"pci":469,"tac_id":38114,"unknown_12":null},{"acc":4553,"cell_id":209978626,"earfcn":1700,"lat":14.25496768,"lon":107.99134826,"mcc":452,"mnc":4,"pci":366,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209924355,"earfcn":1700,"lat":14.42522907,"lon":108.12278747,"mcc":452,"mnc":4,"pci":502,"tac_id":38211,"unknown_12":null},{"acc":9965,"cell_id":209928193,"earfcn":1700,"lat":14.46308898,"lon":107.95381927,"mcc":452,"mnc":4,"pci":320,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209924361,"earfcn":250,"lat":14.42510414,"lon":108.12316894,"mcc":452,"mnc":4,"pci":502,"tac_id":38211,"unknown_12":null},{"acc":2188,"cell_id":207400210,"earfcn":250,"lat":14.28085327,"lon":108.09986114,"mcc":452,"mnc":4,"pci":469,"tac_id":38114,"unknown_12":null},{"acc":2004,"cell_id":207400209,"earfcn":250,"lat":14.27561283,"lon":108.09355926,"mcc":452,"mnc":4,"pci":2,"tac_id":38114,"unknown_12":null},{"acc":1414,"cell_id":209924511,"earfcn":9360,"lat":14.42954635,"lon":108.12075042000001,"mcc":452,"mnc":4,"pci":502,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209927445,"earfcn":1700,"lat":14.3104391,"lon":107.91581726,"mcc":452,"mnc":4,"pci":314,"tac_id":38211,"unknown_12":null},{"acc":4612,"cell_id":209978782,"earfcn":9360,"lat":14.25404357,"lon":107.99061584,"mcc":452,"mnc":4,"pci":366,"tac_id":38211,"unknown_12":null},{"acc":6381,"cell_id":209921979,"earfcn":9360,"lat":14.37658786,"lon":107.90058135,"mcc":452,"mnc":4,"pci":465,"tac_id":38211,"unknown_12":null},{"acc":1621,"cell_id":83464193,"earfcn":40590,"lat":14.46237182,"lon":107.95037078,"mcc":452,"mnc":4,"pci":320,"tac_id":38212,"unknown_12":null},{"acc":6565,"cell_id":209983423,"earfcn":3725,"lat":14.31282329,"lon":107.91171264,"mcc":452,"mnc":4,"pci":31,"tac_id":38211,"unknown_12":null},{"acc":4418,"cell_id":209978816,"earfcn":3725,"lat":14.25088119,"lon":107.9930725,"mcc":452,"mnc":4,"pci":366,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209921805,"earfcn":1700,"lat":14.384115210000001,"lon":107.89836883,"mcc":452,"mnc":4,"pci":467,"tac_id":38211,"unknown_12":null},{"acc":1508,"cell_id":207400203,"earfcn":1700,"lat":14.27561187,"lon":108.10024261000001,"mcc":452,"mnc":4,"pci":2,"tac_id":38114,"unknown_12":null},{"acc":4915,"cell_id":207400359,"earfcn":9360,"lat":14.27318286,"lon":108.09811401,"mcc":452,"mnc":4,"pci":2,"tac_id":38114,"unknown_12":null},{"acc":2904,"cell_id":209921803,"earfcn":1700,"lat":14.38147258,"lon":107.89665985,"mcc":452,"mnc":4,"pci":465,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":84226561,"earfcn":1700,"lat":14.24783802,"lon":107.99240112,"mcc":452,"mnc":4,"pci":80,"tac_id":38211,"unknown_12":null},{"acc":15643,"cell_id":207400199,"earfcn":250,"lat":14.268013,"lon":108.09411621,"mcc":452,"mnc":4,"pci":308,"tac_id":38114,"unknown_12":null},{"acc":7311,"cell_id":209983389,"earfcn":9360,"lat":14.30626106,"lon":107.91094207,"mcc":452,"mnc":4,"pci":31,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209982741,"earfcn":1700,"lat":14.29092979,"lon":107.92150878,"mcc":452,"mnc":4,"pci":193,"tac_id":38211,"unknown_12":null},{"acc":2509,"cell_id":209921804,"earfcn":1700,"lat":14.38002204,"lon":107.89469146,"mcc":452,"mnc":4,"pci":466,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":207400319,"earfcn":250,"lat":14.271037100000001,"lon":108.10134124,"mcc":452,"mnc":4,"pci":468,"tac_id":38114,"unknown_12":null},{"acc":1414,"cell_id":209928195,"earfcn":1700,"lat":14.46612644,"lon":107.94293975000001,"mcc":452,"mnc":4,"pci":318,"tac_id":38212,"unknown_12":null},{"acc":8425,"cell_id":209927446,"earfcn":1700,"lat":14.309351920000001,"lon":107.90668487,"mcc":452,"mnc":4,"pci":313,"tac_id":38211,"unknown_12":null},{"acc":4236,"cell_id":210025219,"earfcn":1700,"lat":14.30188751,"lon":107.91098785,"mcc":452,"mnc":4,"pci":397,"tac_id":38211,"unknown_12":null},{"acc":3183,"cell_id":209963678,"earfcn":9360,"lat":14.481862060000001,"lon":107.96973419,"mcc":452,"mnc":4,"pci":502,"tac_id":38212,"unknown_12":null},{"acc":2775,"cell_id":207400303,"earfcn":1700,"lat":14.26517868,"lon":108.09445953000001,"mcc":452,"mnc":4,"pci":307,"tac_id":38114,"unknown_12":null},{"acc":1414,"cell_id":209985794,"earfcn":1700,"lat":14.43764114,"lon":107.91399383,"mcc":452,"mnc":4,"pci":478,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":207400313,"earfcn":1700,"lat":14.26919746,"lon":108.10094451,"mcc":452,"mnc":4,"pci":468,"tac_id":38114,"unknown_12":null},{"acc":1414,"cell_id":209933825,"earfcn":1700,"lat":14.490661620000001,"lon":108.04417419,"mcc":452,"mnc":4,"pci":101,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209921793,"earfcn":1700,"lat":14.38435649,"lon":107.8923645,"mcc":452,"mnc":4,"pci":285,"tac_id":38211,"unknown_12":null},{"acc":11571,"cell_id":209933981,"earfcn":9360,"lat":14.490822790000001,"lon":108.04499053,"mcc":452,"mnc":4,"pci":101,"tac_id":38212,"unknown_12":null},{"acc":2858,"cell_id":207527873,"earfcn":3725,"lat":14.24222755,"lon":108.03964233,"mcc":452,"mnc":4,"pci":260,"tac_id":38114,"unknown_12":null},{"acc":13437,"cell_id":209983233,"earfcn":1700,"lat":14.31302356,"lon":107.90235137,"mcc":452,"mnc":4,"pci":31,"tac_id":38211,"unknown_12":null},{"acc":1618,"cell_id":207400349,"earfcn":9360,"lat":14.2634325,"lon":108.09550476,"mcc":452,"mnc":4,"pci":308,"tac_id":38114,"unknown_12":null},{"acc":9764,"cell_id":209985950,"earfcn":9360,"lat":14.41411399,"lon":107.89911651,"mcc":452,"mnc":4,"pci":478,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":4136193,"earfcn":40590,"lat":14.26128005,"lon":108.09305572,"mcc":452,"mnc":4,"pci":308,"tac_id":38114,"unknown_12":null},{"acc":16290,"cell_id":207475135,"earfcn":3725,"lat":14.30648803,"lon":107.90423583,"mcc":452,"mnc":4,"pci":1,"tac_id":38114,"unknown_12":null},{"acc":22647,"cell_id":209928351,"earfcn":9360,"lat":14.46769332,"lon":107.93848419,"mcc":452,"mnc":4,"pci":318,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209924353,"earfcn":1700,"lat":14.43006229,"lon":108.13515472,"mcc":452,"mnc":4,"pci":503,"tac_id":38211,"unknown_12":null},{"acc":2284,"cell_id":4136194,"earfcn":40590,"lat":14.256835930000001,"lon":108.08805847,"mcc":452,"mnc":4,"pci":306,"tac_id":38114,"unknown_12":null},{"acc":8515,"cell_id":209982722,"earfcn":1700,"lat":14.26365661,"lon":107.94164276000001,"mcc":452,"mnc":4,"pci":462,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":207400309,"earfcn":250,"lat":14.26045703,"lon":108.09474182,"mcc":452,"mnc":4,"pci":307,"tac_id":38114,"unknown_12":null},{"acc":1628,"cell_id":207400193,"earfcn":1700,"lat":14.26138782,"lon":108.09630584,"mcc":452,"mnc":4,"pci":308,"tac_id":38114,"unknown_12":null},{"acc":1414,"cell_id":209932555,"earfcn":1700,"lat":14.494865410000001,"lon":107.99887084000001,"mcc":452,"mnc":4,"pci":59,"tac_id":38212,"unknown_12":null},{"acc":1622,"cell_id":209985799,"earfcn":250,"lat":14.448634140000001,"lon":107.91600799,"mcc":452,"mnc":4,"pci":479,"tac_id":38212,"unknown_12":null},{"acc":1589,"cell_id":209933836,"earfcn":1700,"lat":14.49561023,"lon":108.04296112,"mcc":452,"mnc":4,"pci":78,"tac_id":38212,"unknown_12":null},{"acc":3413,"cell_id":207400350,"earfcn":9360,"lat":14.25085735,"lon":108.08146667,"mcc":452,"mnc":4,"pci":306,"tac_id":38114,"unknown_12":null},{"acc":1414,"cell_id":209933827,"earfcn":1700,"lat":14.49661731,"lon":108.03947448,"mcc":452,"mnc":4,"pci":99,"tac_id":38212,"unknown_12":null},{"acc":6214,"cell_id":209982748,"earfcn":250,"lat":14.278755180000001,"lon":107.92055511000001,"mcc":452,"mnc":4,"pci":192,"tac_id":38211,"unknown_12":null},{"acc":15952,"cell_id":209985949,"earfcn":9360,"lat":14.45414733,"lon":107.91940307,"mcc":452,"mnc":4,"pci":479,"tac_id":38212,"unknown_12":null},{"acc":1434,"cell_id":207400194,"earfcn":1700,"lat":14.25118923,"lon":108.08354949,"mcc":452,"mnc":4,"pci":306,"tac_id":38114,"unknown_12":null},{"acc":21814,"cell_id":207400713,"earfcn":250,"lat":14.238482470000001,"lon":107.99247741,"mcc":452,"mnc":4,"pci":314,"tac_id":38114,"unknown_12":null},{"acc":1414,"cell_id":209985793,"earfcn":1700,"lat":14.449628820000001,"lon":107.91535186,"mcc":452,"mnc":4,"pci":479,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209933983,"earfcn":9360,"lat":14.49853801,"lon":108.032341,"mcc":452,"mnc":4,"pci":99,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209963561,"earfcn":1700,"lat":14.486186980000001,"lon":107.96102905000001,"mcc":452,"mnc":4,"pci":449,"tac_id":38212,"unknown_12":null},{"acc":3128,"cell_id":209983232,"earfcn":1700,"lat":14.31342124,"lon":107.89582824,"mcc":452,"mnc":4,"pci":29,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":209963567,"earfcn":250,"lat":14.48641967,"lon":107.96089172,"mcc":452,"mnc":4,"pci":449,"tac_id":38212,"unknown_12":null},{"acc":3409,"cell_id":209963522,"earfcn":1700,"lat":14.49409866,"lon":107.98017883,"mcc":452,"mnc":4,"pci":502,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209932585,"earfcn":1700,"lat":14.49907302,"lon":108.00407409,"mcc":452,"mnc":4,"pci":204,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209963562,"earfcn":1700,"lat":14.48724555,"lon":107.9606781,"mcc":452,"mnc":4,"pci":448,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":209963712,"earfcn":3725,"lat":14.49233341,"lon":107.97220611,"mcc":452,"mnc":4,"pci":502,"tac_id":38212,"unknown_12":null},{"acc":1414,"cell_id":207400707,"earfcn":1700,"lat":14.23486328,"lon":107.99391937,"mcc":452,"mnc":4,"pci":314,"tac_id":38114,"unknown_12":null},{"acc":5088,"cell_id":209982742,"earfcn":1700,"lat":14.286230080000001,"lon":107.90949249,"mcc":452,"mnc":4,"pci":192,"tac_id":38211,"unknown_12":null},{"acc":1414,"cell_id":207400863,"earfcn":9360,"lat":14.23426437,"lon":107.99428558,"mcc":452,"mnc":4,"pci":314,"tac_id":38114,"unknown_12":null},{"acc":1414,"cell_id":209983234,"earfcn":1700,"lat":14.308883660000001,"lon":107.89468383,"mcc":452,"mnc":4,"pci":32,"tac_id":38211,"unknown_12":null}],"generated":"2026-11-05 20:27 UTC","target":{"acc":1414,"cell_id":209991683,"earfcn":1700,"lat":14.36705398,"lon":108.02021026,"mcc":452,"mnc":4,"pci":286,"tac_id":38211,"unknown_12":1066}};
+
+const RAMP = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
+              "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"];
+const GRID = 240;
+const SIGNAL_DB = 30;
+
+const isDark = () => {
+  const theme = document.documentElement.dataset.theme;
+  if (theme) return theme === "dark";
+  return matchMedia("(prefers-color-scheme: dark)").matches;
+};
+const css = (name) => getComputedStyle(document.querySelector(".viz-root")).getPropertyValue(name).trim();
+const $ = (id) => document.getElementById(id);
+
+// local metric coordinates around the target cell
+const t = DATA.target;
+const M_LAT = 111320;
+const M_LON = 111320 * Math.cos(t.lat * Math.PI / 180);
+const toXY = (lat, lon) => [(lon - t.lon) * M_LON, (lat - t.lat) * M_LAT];
+const toLatLon = (x, y) => [t.lat + y / M_LAT, t.lon + x / M_LON];
+
+const cells = [t, ...DATA.cells];
+const cx = new Float64Array(cells.length);
+const cy = new Float64Array(cells.length);
+const acc = new Float64Array(cells.length);
+const reach = new Float64Array(cells.length);
+cells.forEach((c, i) => {
+  [cx[i], cy[i]] = toXY(c.lat, c.lon);
+  acc[i] = c.acc != null && c.acc > 0 ? c.acc : 1414;
+  reach[i] = c.unknown_12 != null && c.unknown_12 > 0 ? c.unknown_12 : NaN;
+  c.dist = Math.hypot(cx[i], cy[i]);
+});
+
+// LTE downlink EARFCN ranges (3GPP TS 36.101) of common bands
+const BANDS = [[0, 599, 1, 2100], [600, 1199, 2, 1900], [1200, 1949, 3, 1800], [1950, 2399, 4, 1700],
+  [2400, 2649, 5, 850], [2750, 3449, 7, 2600], [3450, 3799, 8, 900], [5010, 5179, 12, 700],
+  [5180, 5279, 13, 700], [6150, 6449, 20, 800], [9210, 9659, 28, 700], [37750, 38249, 38, 2600],
+  [38650, 39649, 40, 2300], [39650, 41589, 41, 2500], [41590, 43589, 42, 3500]];
+function band(earfcn) {
+  const b = BANDS.find(([lo, hi]) => earfcn >= lo && earfcn <= hi);
+  return b ? `band ${b[2]}, ${b[3]} MHz` : "";
+}
+
+const sameFreq = cells.map((c) => t.earfcn != null && c.earfcn === t.earfcn);
+const freqKnown = t.earfcn != null;
+if (!freqKnown) $("same-freq").checked = false;
+$("same-freq").disabled = !freqKnown;
+if (!(t.unknown_12 > 0)) {
+  $("use-reach").disabled = true;
+  $("use-reach-label").textContent = "Field 12 not crawled yet for this cell";
+}
+$("same-freq-label").textContent = freqKnown
+  ? `Only cells on this cell's frequency (EARFCN ${t.earfcn})`
+  : "Frequency of this cell unknown: comparing with all cells";
+
+// indices of the cells this cell competes with (always includes the cell itself at 0)
+let active = [];
+function updateActive() {
+  const only = $("same-freq").checked;
+  active = cells.map((_, i) => i).filter((i) => i === 0 || !only || sameFreq[i]);
+}
+
+// typical spacing: median distance from each competing cell to its nearest neighbour
+function typicalSpacing() {
+  const nn = active.slice(0, 300).map((i) => {
+    let best = Infinity;
+    for (const j of active) {
+      if (j === i) continue;
+      const d = Math.hypot(cx[i] - cx[j], cy[i] - cy[j]);
+      if (d > 30 && d < best) best = d;
+    }
+    return best;
+  }).filter(Number.isFinite).sort((a, b) => a - b);
+  return nn.length ? nn[Math.floor(nn.length / 2)] : 1000;
+}
+function resetRange() {
+  updateActive();
+  const auto = Math.min(15000, Math.max(1500, 4 * typicalSpacing()));
+  $("range").value = (auto / 1000).toFixed(1);
+}
+resetRange();
+
+function params() {
+  const n = +$("n").value;
+  const sigma = +$("sigma").value;
+  const k = +$("k").value;
+  const range = +$("range").value * 1000;
+  // experimental: fade out at this cell's own reach (Apple's field 12) instead of the
+  // shared max range; competition between cells stays distance-based
+  const useReach = $("use-reach").checked && !Number.isNaN(reach[0]);
+  return {
+    n, sigma, k, range, useReach,
+    fade: useReach ? reach[0] : range,
+    view: document.querySelector("input[name=view]:checked").value,
+    // received power in dB is -10 n log10(d); a logit over powers with this temperature
+    // matches Gaussian signal variation of sigma dB
+    K: 10 * n / Math.LN10,
+    T: sigma * Math.sqrt(6) / Math.PI,
+  };
+}
+
+const P = new Float64Array(cells.length);
+// returns { share, signal, best, bestShare } at metric point (x, y)
+function evaluate(x, y, p) {
+  const k2 = p.k * p.k;
+  let max = -p.K * Math.log(p.fade); // fade-out level acts as a "no service" competitor
+  const p0 = max;
+  let best = 0;
+  for (const j of active) {
+    const dx = x - cx[j], dy = y - cy[j];
+    const d2 = dx * dx + dy * dy + k2 * acc[j] * acc[j] + 1;
+    P[j] = -0.5 * p.K * Math.log(d2);
+    if (P[j] > P[best]) best = j;
+    if (P[j] > max) max = P[j];
+  }
+  let sum = Math.exp((p0 - max) / p.T);
+  for (const j of active) sum += Math.exp((P[j] - max) / p.T);
+  return {
+    share: Math.exp((P[0] - max) / p.T) / sum,
+    signal: P[0] - p0,
+    best,
+    bestShare: Math.exp((P[best] - max) / p.T) / sum,
+  };
+}
+
+function rampColor(v) {
+  const ramp = isDark() ? [...RAMP].reverse() : RAMP;
+  const f = Math.min(1, Math.max(0, v)) * (ramp.length - 1);
+  const i = Math.min(ramp.length - 2, Math.floor(f));
+  const a = ramp[i], b = ramp[i + 1], u = f - i;
+  const ch = (h, o) => parseInt(h.slice(o, o + 2), 16);
+  return [1, 3, 5].map((o) => Math.round(ch(a, o) * (1 - u) + ch(b, o) * u));
+}
+
+const canvas = document.createElement("canvas");
+canvas.width = canvas.height = GRID;
+let extent = 0;
+let stats = {};
+let styleReady = false;
+let fitted = false;
+
+function render() {
+  const p = params();
+  extent = Math.min(15000, Math.max(p.fade * 1.2, 1500));
+  const ctx = canvas.getContext("2d");
+  const img = ctx.createImageData(GRID, GRID);
+  const step = 2 * extent / GRID;
+  let area = 0, reach = 0;
+  for (let row = 0; row < GRID; row++) {
+    const y = extent - (row + 0.5) * step;
+    for (let col = 0; col < GRID; col++) {
+      const x = -extent + (col + 0.5) * step;
+      const r = evaluate(x, y, p);
+      if (r.share > 0.5) {
+        area += step * step;
+        reach = Math.max(reach, Math.hypot(x, y));
+      }
+      const v = p.view === "share" ? r.share : r.signal / SIGNAL_DB;
+      const o = (row * GRID + col) * 4;
+      if (v < 0.02) continue;
+      const [cr, cg, cb] = rampColor(v);
+      img.data[o] = cr; img.data[o + 1] = cg; img.data[o + 2] = cb;
+      img.data[o + 3] = Math.round(255 * Math.min(0.8, 0.2 + 0.65 * Math.min(1, v)));
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  stats = { area, reach };
+  updateText(p);
+  const [north, west] = toLatLon(-extent, extent);
+  const [south, east] = toLatLon(extent, -extent);
+  const coordinates = [[west, north], [east, north], [east, south], [west, south]];
+  if (!styleReady) return;
+  const source = map.getSource("heat");
+  if (source) source.updateImage({ url: canvas.toDataURL(), coordinates });
+  else addLayers(coordinates);
+  if (!fitted) {
+    fitted = true;
+    map.fitBounds([[west, south], [east, north]], { padding: 20, animate: false });
+  }
+}
+
+// competing cells in the cell colour, cells on other frequencies muted and smaller
+function styleCells() {
+  if (!map.getLayer("cells")) return;
+  const only = $("same-freq").checked;
+  map.setPaintProperty("cells", "circle-color", only ? ["case", ["get", "same"], css("--cell"), css("--muted")] : css("--cell"));
+  map.setPaintProperty("cells", "circle-radius", only ? ["case", ["get", "same"], 4, 3] : 4);
+}
+
+function fmtKm(m) { return m >= 1000 ? (m / 1000).toFixed(1) + " km" : Math.round(m) + " m"; }
+
+function updateText(p) {
+  $("n-out").textContent = p.n.toFixed(1);
+  $("sigma-out").textContent = p.sigma.toFixed(1);
+  $("k-out").textContent = p.k.toFixed(2);
+  $("range-out").textContent = p.useReach ? `${(p.fade / 1000).toFixed(1)} (field 12)` : (p.range / 1000).toFixed(1);
+  $("range").disabled = p.useReach;
+  $("stat-area").textContent = (stats.area / 1e6).toFixed(2) + " km²";
+  $("stat-cells").textContent = String(active.length - 1);
+  $("stat-cells-label").textContent = $("same-freq").checked
+    ? "cells on the same frequency modelled nearby"
+    : "same-operator cells modelled nearby";
+  $("other-freq-key").style.display = $("same-freq").checked ? "" : "none";
+  styleCells();
+  $("stat-reach").textContent = stats.area ? fmtKm(stats.reach) : "none";
+  const isShare = p.view === "share";
+  $("legend-title").textContent = isShare
+    ? "Chance this cell is the strongest of its operator"
+    : "Modelled signal above edge of coverage";
+  const ramp = isDark() ? [...RAMP].reverse() : RAMP;
+  $("legend-ramp").style.background = `linear-gradient(to right, transparent, ${ramp.join(", ")})`;
+  const ticks = isShare ? ["0%", "25%", "50%", "75%", "100%"] : ["0 dB", "", "15 dB", "", "30+ dB"];
+  $("legend-ticks").replaceChildren(...ticks.map((s) => {
+    const span = document.createElement("span");
+    span.textContent = s;
+    return span;
+  }));
+}
+
+function circle(lat, lon, radius) {
+  const ring = [];
+  for (let i = 0; i <= 64; i++) {
+    const a = 2 * Math.PI * i / 64;
+    ring.push([lon + radius * Math.cos(a) / M_LON, lat + radius * Math.sin(a) / M_LAT]);
+  }
+  return { type: "Feature", geometry: { type: "Polygon", coordinates: [ring] }, properties: {} };
+}
+
+const pointFeatures = {
+  type: "FeatureCollection",
+  features: DATA.cells.map((c, i) => ({
+    type: "Feature",
+    geometry: { type: "Point", coordinates: [c.lon, c.lat] },
+    properties: { i: i + 1, same: sameFreq[i + 1] },
+  })),
+};
+
+// keyless vector basemap; it carries its own attribution
+function baseStyle() {
+  return `https://tiles.openfreemap.org/styles/${isDark() ? "dark" : "positron"}`;
+}
+
+function addLayers(coordinates) {
+  map.addSource("heat", { type: "image", url: canvas.toDataURL(), coordinates });
+  // below the basemap's labels so place names stay readable
+  const labels = map.getStyle().layers.find((l) => l.type === "symbol");
+  map.addLayer({ id: "heat", type: "raster", source: "heat", paint: { "raster-resampling": "linear", "raster-fade-duration": 0 } }, labels?.id);
+  map.addSource("acc", { type: "geojson", data: circle(t.lat, t.lon, acc[0]) });
+  map.addLayer({ id: "acc", type: "line", source: "acc", paint: { "line-color": css("--target"), "line-width": 1.5 } });
+  map.addSource("hover-acc", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  map.addLayer({ id: "hover-acc", type: "line", source: "hover-acc", paint: { "line-color": css("--cell"), "line-width": 1 } });
+  map.addSource("cells", { type: "geojson", data: pointFeatures });
+  map.addLayer({
+    id: "cells", type: "circle", source: "cells",
+    paint: { "circle-radius": 4, "circle-color": css("--cell"), "circle-stroke-width": 2, "circle-stroke-color": css("--surface-1") },
+  });
+  map.addSource("target", { type: "geojson", data: { type: "Feature", geometry: { type: "Point", coordinates: [t.lon, t.lat] }, properties: { i: 0 } } });
+  map.addLayer({
+    id: "target", type: "circle", source: "target",
+    paint: { "circle-radius": 6, "circle-color": css("--target"), "circle-stroke-width": 2, "circle-stroke-color": css("--surface-1") },
+  });
+  styleCells();
+}
+
+const map = new maplibregl.Map({ container: "map", style: baseStyle(), center: [t.lon, t.lat], zoom: 12 });
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }));
+// fires again after a theme change replaces the style, which drops our layers
+map.on("style.load", () => { styleReady = true; render(); });
+
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => map.setStyle(baseStyle()));
+
+$("same-freq").addEventListener("input", resetRange);
+let pending = false;
+for (const el of document.querySelectorAll(".controls input")) {
+  el.addEventListener("input", () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; render(); });
+  });
+}
+
+const site = (id) => Math.floor(id / 256);
+const sector = (id) => id % 256;
+function cellLabel(c) { return `cell ${c.cell_id} · TAC ${c.tac_id} · site ${site(c.cell_id)} / sector ${sector(c.cell_id)}`; }
+function radioLabel(c) {
+  if (c.earfcn == null) return "frequency unknown";
+  const b = band(c.earfcn);
+  return `EARFCN ${c.earfcn}${b ? " (" + b + ")" : ""} · PCI ${c.pci ?? "unknown"}`;
+}
+
+const tooltip = $("tooltip");
+function showTooltip(point, lines) {
+  tooltip.replaceChildren();
+  lines.forEach(([text, strong], i) => {
+    if (i) tooltip.appendChild(document.createElement("br"));
+    const el = document.createElement(strong ? "strong" : "span");
+    el.textContent = text;
+    tooltip.appendChild(el);
+  });
+  tooltip.style.display = "block";
+  const w = tooltip.offsetWidth, h = tooltip.offsetHeight;
+  const card = $("map");
+  const left = point.x + 14 + w > card.clientWidth ? point.x - 14 - w : point.x + 14;
+  const top = point.y + 14 + h > card.clientHeight ? point.y - 14 - h : point.y + 14;
+  tooltip.style.left = left + "px";
+  tooltip.style.top = top + "px";
+}
+
+map.on("mousemove", (e) => {
+  if (!map.getLayer("cells")) return;
+  const pad = 12;
+  const hits = map.queryRenderedFeatures(
+    [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]],
+    { layers: ["target", "cells"] },
+  );
+  const hover = map.getSource("hover-acc");
+  if (hits.length) {
+    const c = cells[hits[0].properties.i];
+    hover.setData(hits[0].properties.i === 0 ? { type: "FeatureCollection", features: [] } : circle(c.lat, c.lon, acc[hits[0].properties.i]));
+    showTooltip(e.point, [
+      [`accuracy ${c.acc != null ? Math.round(c.acc) + " m" : "unknown"}`, true],
+      [cellLabel(c)],
+      [radioLabel(c)],
+      [`field 12 (reach?) ${c.unknown_12 != null ? fmtKm(c.unknown_12) : "unknown"}`],
+      [hits[0].properties.i === 0 ? "the cell this map is for" : `${fmtKm(c.dist)} from this cell`],
+    ]);
+    map.getCanvas().style.cursor = "pointer";
+    return;
+  }
+  hover.setData({ type: "FeatureCollection", features: [] });
+  map.getCanvas().style.cursor = "";
+  const p = params();
+  const [x, y] = toXY(e.lngLat.lat, e.lngLat.lng);
+  const r = evaluate(x, y, p);
+  const best = cells[r.best];
+  showTooltip(e.point, [
+    [`${Math.round(r.share * 100)}% likely served by this cell`, true],
+    [`signal ${r.signal >= 0 ? "+" : ""}${r.signal.toFixed(1)} dB vs edge of coverage`],
+    [`${fmtKm(Math.hypot(x, y))} from this cell`],
+    [r.best === 0 ? "this cell is the most likely server here" : `most likely server: cell ${best.cell_id} (${Math.round(r.bestShare * 100)}%)`],
+  ]);
+});
+map.getContainer().addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+
+$("title").textContent = `Estimated coverage of cell ${t.cell_id}`;
+$("subtitle").textContent = `MCC ${t.mcc} · MNC ${t.mnc} · TAC ${t.tac_id} · site ${site(t.cell_id)}, sector ${sector(t.cell_id)} · ` +
+  `${radioLabel(t)} · ` +
+  `${t.lat.toFixed(5)}, ${t.lon.toFixed(5)} · data from ${DATA.generated}`;
+$("stat-acc").textContent = t.acc != null ? Math.round(t.acc) + " m" : "unknown";
+
+const tbody = $("table-body");
+for (const c of cells.slice(0, 100)) {
+  const tr = document.createElement("tr");
+  const values = [c.cell_id, c.tac_id, site(c.cell_id), sector(c.cell_id),
+                  c.earfcn ?? "unknown", c.earfcn != null ? band(c.earfcn) : "", c.pci ?? "unknown", Math.round(c.dist),
+                  c.acc != null ? Math.round(c.acc) : "unknown", c.lat.toFixed(6), c.lon.toFixed(6)];
+  for (const v of values) {
+    const td = document.createElement("td");
+    td.textContent = String(v);
+    tr.appendChild(td);
+  }
+  tbody.appendChild(tr);
+}
+</script>
+</body>
+</html>
