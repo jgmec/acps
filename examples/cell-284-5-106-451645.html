@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cell coverage estimate</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.1.3/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@4.1.3/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/d3-array@3.2.4/dist/d3-array.min.js"></script>
+<script src="https://unpkg.com/d3-contour@4.0.2/dist/d3-contour.min.js"></script>
+<style>
+.viz-root {
+  color-scheme: light;
+  --surface-1: #fcfcfb;
+  --page: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --muted: #898781;
+  --gridline: #e1e0d9;
+  --border: rgba(11, 11, 11, 0.10);
+  --target: #eb6834;
+  --cell: #52514e;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --page: #0d0d0d;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --gridline: #2c2c2a;
+    --border: rgba(255, 255, 255, 0.10);
+    --target: #d95926;
+    --cell: #c3c2b7;
+  }
+}
+:root[data-theme="dark"] .viz-root {
+  color-scheme: dark;
+  --surface-1: #1a1a19;
+  --page: #0d0d0d;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --gridline: #2c2c2a;
+  --border: rgba(255, 255, 255, 0.10);
+  --target: #d95926;
+  --cell: #c3c2b7;
+}
+body { margin: 0; }
+.viz-root {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--page);
+  color: var(--text-primary);
+  min-height: 100vh;
+  padding: 16px 20px 32px;
+  box-sizing: border-box;
+}
+h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+.sub { margin: 0 0 16px; color: var(--text-secondary); font-size: 13px; }
+.stats { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.stat {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  min-width: 150px;
+}
+.stat .value { font-size: 22px; font-weight: 600; }
+.stat .label { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  align-items: flex-end;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.controls label { display: flex; flex-direction: column; gap: 4px; }
+.controls output { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.controls fieldset { border: 0; padding: 0; margin: 0; display: flex; gap: 12px; }
+.controls legend { padding: 0; margin-bottom: 4px; }
+.card {
+  position: relative;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+#map { height: 68vh; min-height: 420px; }
+.legend {
+  position: absolute;
+  left: 12px;
+  bottom: 28px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  z-index: 2;
+}
+.legend .title { color: var(--text-primary); margin-bottom: 6px; }
+.legend .ramp { width: 220px; height: 10px; border-radius: 2px; }
+.legend .ticks {
+  display: flex;
+  justify-content: space-between;
+  width: 220px;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.legend .keys { display: flex; gap: 14px; margin-top: 8px; }
+.legend .key { display: flex; align-items: center; gap: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 0 2px var(--surface-1); }
+.line-key { width: 14px; height: 0; border-top: 1.5px solid var(--text-secondary); }
+.ring { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--target); }
+.tooltip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 3;
+  display: none;
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  white-space: nowrap;
+}
+.tooltip strong { color: var(--text-primary); font-size: 14px; }
+details { margin-top: 16px; font-size: 13px; }
+summary { cursor: pointer; color: var(--text-secondary); }
+table { border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 4px 10px; border-bottom: 1px solid var(--gridline); }
+th { color: var(--text-secondary); font-weight: 500; }
+.note { margin-top: 16px; font-size: 12px; color: var(--text-secondary); max-width: 900px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <h1 id="title"></h1>
+  <p class="sub" id="subtitle"></p>
+
+  <div class="stats">
+    <div class="stat"><div class="value" id="stat-area"></div><div class="label">area where this cell is the most likely server (&gt;50%)</div></div>
+    <div class="stat"><div class="value" id="stat-reach"></div><div class="label">furthest point with &gt;50% likelihood</div></div>
+    <div class="stat"><div class="value" id="stat-acc"></div><div class="label">Apple's location accuracy for this cell</div></div>
+    <div class="stat"><div class="value" id="stat-cells"></div><div class="label" id="stat-cells-label">same-operator cells modelled nearby</div></div>
+  </div>
+
+  <div class="controls">
+    <fieldset>
+      <legend>Show</legend>
+      <label style="flex-direction:row;align-items:center"><input type="radio" name="view" value="share" checked> Serving likelihood</label>
+      <label style="flex-direction:row;align-items:center"><input type="radio" name="view" value="signal"> Relative signal</label>
+    </fieldset>
+    <label>Path-loss exponent <output id="n-out"></output><input id="n" type="range" min="2" max="5" step="0.1" value="3.5"></label>
+    <label>Signal variation (dB) <output id="sigma-out"></output><input id="sigma" type="range" min="2" max="14" step="0.5" value="8"></label>
+    <label>Accuracy weight <output id="k-out"></output><input id="k" type="range" min="0" max="1" step="0.05" value="0"></label>
+    <label>Max range (km) <output id="range-out"></output><input id="range" type="range" min="0.5" max="20" step="0.1"></label>
+    <label style="flex-direction:row;align-items:center"><input type="checkbox" id="same-freq" checked> <span id="same-freq-label"></span></label>
+    <label style="flex-direction:row;align-items:center"><input type="checkbox" id="contours" checked> Contour lines</label>
+    <label style="flex-direction:row;align-items:center"><input type="checkbox" id="directional"> <span id="directional-label">Antenna directions (rough estimate)</span></label>
+    <label style="flex-direction:row;align-items:center"><input type="checkbox" id="use-reach"> <span id="use-reach-label">Fade out at this cell's reach from Apple's field 12 (experimental)</span></label>
+  </div>
+
+  <div class="card">
+    <div id="map" role="img" aria-label="Map of the estimated coverage of the selected cell"></div>
+    <div class="legend">
+      <div class="title" id="legend-title"></div>
+      <div class="ramp" id="legend-ramp"></div>
+      <div class="ticks" id="legend-ticks"></div>
+      <div class="keys">
+        <span class="key"><span class="dot" style="background:var(--target)"></span>this cell</span>
+        <span class="key"><span class="ring"></span>its accuracy</span>
+        <span class="key"><span class="dot" style="background:var(--cell)"></span>competing cells</span>
+        <span class="key" id="contour-key"><span class="line-key"></span><span id="contour-key-label"></span></span>
+        <span class="key" id="other-freq-key"><span class="dot" style="background:var(--muted)"></span>other frequencies</span>
+      </div>
+    </div>
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+
+  <details>
+    <summary>Table: this cell and the nearest cells of the same operator</summary>
+    <table>
+      <thead><tr><th>Cell ID</th><th>TAC</th><th>Site</th><th>Sector</th><th>EARFCN</th><th>Band</th><th>PCI</th><th>Distance (m)</th><th>Accuracy (m)</th><th>Latitude</th><th>Longitude</th><th>Crawled (UTC)</th></tr></thead>
+      <tbody id="table-body"></tbody>
+    </table>
+  </details>
+
+  <p class="note">
+    This is a model, not a measurement. Each cell's position is Apple's estimate of where the cell is used, not the
+    tower location. Signal is modelled as falling off with distance (path-loss exponent: about 2 in open country,
+    3–4 in towns), and a phone is assumed to use whichever cell of its operator is strongest, allowing for random
+    signal variation from buildings and terrain. <em>Serving likelihood</em> is the chance this cell is the strongest at
+    a spot. <em>Relative signal</em> is this cell's modelled level above the edge of coverage, ignoring other cells.
+    Accuracy weight blurs each cell's position by its accuracy; at 0 positions are taken as exact. Max range is the
+    distance at which signal is assumed to fade out; it starts from 4× the typical spacing between nearby cells.
+    Antenna directions (off by default) give each sector a wedge-shaped antenna pattern, pointing from its site's
+    centre towards the sector's position. Apple places sectors where phones saw them, which is partly in the direction
+    the antenna faces, but it's a rough estimate: on real three-sector sites the estimated directions are only somewhat
+    more evenly spread than random ones. Cells whose direction can't be estimated stay round.
+    The experimental field 12 option fades this cell out at its own reach instead: an undocumented number from
+    Apple's reply that grows with the spacing between cells like a coverage radius, though its meaning is a guess.
+    Operators run several frequency layers over the same area and a phone doesn't choose between layers by
+    distance, so by default this cell only competes with cells on its own frequency (EARFCN); cells whose frequency
+    isn't known yet are left out until the crawler sees them again. Cells Apple doesn't know, or that the crawler
+    hasn't found yet, are missing from the model.
+  </p>
+</div>
+
+<script>
+"use strict";
+const DATA = {"cells":[{"acc":1414,"azimuth_deg":165.0,"cell_id":451646,"crawled_at":"2026-11-05T22:40:09Z","earfcn":null,"lat":42.66375732,"lon":23.2759571,"mcc":284,"mnc":5,"pci":null,"tac_id":106,"unknown_12":541},{"acc":1414,"azimuth_deg":268.0,"cell_id":451647,"crawled_at":"2026-11-05T22:40:09Z","earfcn":null,"lat":42.6654129,"lon":23.27276229,"mcc":284,"mnc":5,"pci":null,"tac_id":106,"unknown_12":1196},{"acc":1414,"azimuth_deg":288.0,"cell_id":268351,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.666324610000004,"lon":23.284547800000002,"mcc":284,"mnc":5,"pci":368,"tac_id":106,"unknown_12":458},{"acc":1414,"azimuth_deg":46.0,"cell_id":310333,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.67130661,"lon":23.27209854,"mcc":284,"mnc":5,"pci":311,"tac_id":102,"unknown_12":1096},{"acc":1414,"azimuth_deg":226.0,"cell_id":310335,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.668010710000004,"lon":23.26793861,"mcc":284,"mnc":5,"pci":151,"tac_id":102,"unknown_12":5450},{"acc":1414,"azimuth_deg":null,"cell_id":262461,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.67284011,"lon":23.2837162,"mcc":284,"mnc":5,"pci":425,"tac_id":102,"unknown_12":1023},{"acc":1414,"azimuth_deg":null,"cell_id":418643,"crawled_at":"2026-11-05T22:33:24Z","earfcn":100,"lat":42.67474365,"lon":23.27844238,"mcc":284,"mnc":5,"pci":177,"tac_id":102,"unknown_12":650},{"acc":1414,"azimuth_deg":226.0,"cell_id":310355,"crawled_at":"2026-11-05T22:33:24Z","earfcn":100,"lat":42.6676712,"lon":23.266353600000002,"mcc":284,"mnc":5,"pci":151,"tac_id":102,"unknown_12":1993},{"acc":1414,"azimuth_deg":140.0,"cell_id":268350,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.66493225,"lon":23.28792953,"mcc":284,"mnc":5,"pci":282,"tac_id":106,"unknown_12":364},{"acc":1414,"azimuth_deg":81.0,"cell_id":268349,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.66589355,"lon":23.28859138,"mcc":284,"mnc":5,"pci":364,"tac_id":101,"unknown_12":382},{"acc":1414,"azimuth_deg":null,"cell_id":490068,"crawled_at":"2026-11-05T22:33:24Z","earfcn":100,"lat":42.66386032,"lon":23.2890129,"mcc":284,"mnc":5,"pci":303,"tac_id":101,"unknown_12":116},{"acc":1414,"azimuth_deg":351.0,"cell_id":395327,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.66404342,"lon":23.2653408,"mcc":284,"mnc":5,"pci":192,"tac_id":106,"unknown_12":532},{"acc":1414,"azimuth_deg":null,"cell_id":362558,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.65799713,"lon":23.27173995,"mcc":284,"mnc":5,"pci":387,"tac_id":106,"unknown_12":3448},{"acc":1414,"azimuth_deg":171.0,"cell_id":395326,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.66126251,"lon":23.26624679,"mcc":284,"mnc":5,"pci":384,"tac_id":106,"unknown_12":585},{"acc":1414,"azimuth_deg":171.0,"cell_id":395346,"crawled_at":"2026-11-05T22:33:24Z","earfcn":100,"lat":42.66004943,"lon":23.26596641,"mcc":284,"mnc":5,"pci":384,"tac_id":106,"unknown_12":1592},{"acc":1414,"azimuth_deg":74.0,"cell_id":310077,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.66461563,"lon":23.26102256,"mcc":284,"mnc":5,"pci":172,"tac_id":106,"unknown_12":1772},{"acc":1414,"azimuth_deg":null,"cell_id":280638,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.67748641,"lon":23.28688812,"mcc":284,"mnc":5,"pci":488,"tac_id":102,"unknown_12":558},{"acc":1414,"azimuth_deg":null,"cell_id":303677,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.67514038,"lon":23.290588370000002,"mcc":284,"mnc":5,"pci":339,"tac_id":102,"unknown_12":512},{"acc":1414,"azimuth_deg":79.0,"cell_id":303421,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.67472839,"lon":23.262718200000002,"mcc":284,"mnc":5,"pci":6,"tac_id":102,"unknown_12":713},{"acc":1414,"azimuth_deg":null,"cell_id":282962,"crawled_at":"2026-11-05T22:33:24Z","earfcn":100,"lat":42.68124389,"lon":23.269815440000002,"mcc":284,"mnc":5,"pci":349,"tac_id":102,"unknown_12":1086},{"acc":1414,"azimuth_deg":259.0,"cell_id":303422,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.67409133,"lon":23.25844383,"mcc":284,"mnc":5,"pci":204,"tac_id":102,"unknown_12":1519},{"acc":1414,"azimuth_deg":null,"cell_id":441937,"crawled_at":"2026-11-05T22:33:24Z","earfcn":100,"lat":42.65438079,"lon":23.263906470000002,"mcc":284,"mnc":5,"pci":321,"tac_id":106,"unknown_12":3786},{"acc":1414,"azimuth_deg":null,"cell_id":362045,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.68112564,"lon":23.26512718,"mcc":284,"mnc":5,"pci":438,"tac_id":102,"unknown_12":2970},{"acc":1414,"azimuth_deg":null,"cell_id":505150,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.6516304,"lon":23.28881645,"mcc":284,"mnc":5,"pci":55,"tac_id":106,"unknown_12":2780},{"acc":1414,"azimuth_deg":254.0,"cell_id":310079,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.66283798,"lon":23.25332832,"mcc":284,"mnc":5,"pci":51,"tac_id":106,"unknown_12":1390},{"acc":1414,"azimuth_deg":null,"cell_id":328529,"crawled_at":"2026-11-05T22:33:24Z","earfcn":100,"lat":42.64906692,"lon":23.272987360000002,"mcc":284,"mnc":5,"pci":176,"tac_id":106,"unknown_12":1048},{"acc":1414,"azimuth_deg":null,"cell_id":505170,"crawled_at":"2026-11-05T22:33:24Z","earfcn":100,"lat":42.65073394,"lon":23.28954696,"mcc":284,"mnc":5,"pci":55,"tac_id":106,"unknown_12":1811},{"acc":1414,"azimuth_deg":254.0,"cell_id":310099,"crawled_at":"2026-11-05T22:33:24Z","earfcn":100,"lat":42.66246795,"lon":23.24969291,"mcc":284,"mnc":5,"pci":51,"tac_id":106,"unknown_12":1572},{"acc":2043,"azimuth_deg":null,"cell_id":324689,"crawled_at":"2026-11-05T22:33:25Z","earfcn":100,"lat":42.64604568,"lon":23.26959419,"mcc":284,"mnc":5,"pci":227,"tac_id":106,"unknown_12":7484},{"acc":1414,"azimuth_deg":46.0,"cell_id":384573,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.66969299,"lon":23.24604606,"mcc":284,"mnc":5,"pci":16,"tac_id":106,"unknown_12":1122},{"acc":1414,"azimuth_deg":181.0,"cell_id":384594,"crawled_at":"2026-11-05T22:33:24Z","earfcn":100,"lat":42.659355160000004,"lon":23.24358558,"mcc":284,"mnc":5,"pci":100,"tac_id":106,"unknown_12":2263},{"acc":1414,"azimuth_deg":181.0,"cell_id":384574,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.65998458,"lon":23.24173545,"mcc":284,"mnc":5,"pci":100,"tac_id":106,"unknown_12":1992},{"acc":1414,"azimuth_deg":181.0,"cell_id":384514,"crawled_at":"2026-11-05T22:33:25Z","earfcn":1550,"lat":42.65888214,"lon":23.24180412,"mcc":284,"mnc":5,"pci":100,"tac_id":106,"unknown_12":2542},{"acc":8476,"azimuth_deg":337.0,"cell_id":384575,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.67265701,"lon":23.23950576,"mcc":284,"mnc":5,"pci":461,"tac_id":106,"unknown_12":20671},{"acc":1414,"azimuth_deg":null,"cell_id":366654,"crawled_at":"2026-11-05T22:33:24Z","earfcn":3350,"lat":42.67583847,"lon":23.23217201,"mcc":284,"mnc":5,"pci":81,"tac_id":102,"unknown_12":3309},{"acc":1414,"azimuth_deg":null,"cell_id":382467,"crawled_at":"2026-11-05T22:33:24Z","earfcn":1550,"lat":42.65520477,"lon":23.231174460000002,"mcc":284,"mnc":5,"pci":131,"tac_id":106,"unknown_12":719},{"acc":1414,"azimuth_deg":null,"cell_id":382547,"crawled_at":"2026-11-05T22:33:25Z","earfcn":100,"lat":42.65523529,"lon":23.23098754,"mcc":284,"mnc":5,"pci":131,"tac_id":106,"unknown_12":686},{"acc":1414,"azimuth_deg":47.0,"cell_id":309762,"crawled_at":"2026-11-05T22:33:24Z","earfcn":1550,"lat":42.648025510000004,"lon":23.21188545,"mcc":284,"mnc":5,"pci":251,"tac_id":201,"unknown_12":1418},{"acc":1414,"azimuth_deg":227.0,"cell_id":309942,"crawled_at":"2026-11-05T22:33:24Z","earfcn":6400,"lat":42.64369583,"lon":23.2056446,"mcc":284,"mnc":5,"pci":209,"tac_id":201,"unknown_12":1564}],"generated":"2026-11-05 22:41 UTC","target":{"acc":1414,"azimuth_deg":39.0,"cell_id":451645,"crawled_at":"2026-11-05T22:33:24Z","earfcn":null,"lat":42.66722488,"lon":23.27730751,"mcc":284,"mnc":5,"pci":null,"tac_id":106,"unknown_12":3652}};
+
+const RAMP = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
+              "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"];
+const GRID = 240;
+const SIGNAL_DB = 30;
+
+const isDark = () => {
+  const theme = document.documentElement.dataset.theme;
+  if (theme) return theme === "dark";
+  return matchMedia("(prefers-color-scheme: dark)").matches;
+};
+const css = (name) => getComputedStyle(document.querySelector(".viz-root")).getPropertyValue(name).trim();
+const $ = (id) => document.getElementById(id);
+
+// local metric coordinates around the target cell
+const t = DATA.target;
+const M_LAT = 111320;
+const M_LON = 111320 * Math.cos(t.lat * Math.PI / 180);
+const toXY = (lat, lon) => [(lon - t.lon) * M_LON, (lat - t.lat) * M_LAT];
+const toLatLon = (x, y) => [t.lat + y / M_LAT, t.lon + x / M_LON];
+
+const cells = [t, ...DATA.cells];
+const cx = new Float64Array(cells.length);
+const cy = new Float64Array(cells.length);
+const acc = new Float64Array(cells.length);
+const reach = new Float64Array(cells.length);
+// antenna direction in radians clockwise from north, estimated by wtfps; NaN if unknown
+const azimuth = new Float64Array(cells.length);
+cells.forEach((c, i) => {
+  [cx[i], cy[i]] = toXY(c.lat, c.lon);
+  acc[i] = c.acc != null && c.acc > 0 ? c.acc : 1414;
+  reach[i] = c.unknown_12 != null && c.unknown_12 > 0 ? c.unknown_12 : NaN;
+  azimuth[i] = c.azimuth_deg != null ? c.azimuth_deg * Math.PI / 180 : NaN;
+  c.dist = Math.hypot(cx[i], cy[i]);
+});
+
+// LTE downlink EARFCN ranges (3GPP TS 36.101) of common bands
+const BANDS = [[0, 599, 1, 2100], [600, 1199, 2, 1900], [1200, 1949, 3, 1800], [1950, 2399, 4, 1700],
+  [2400, 2649, 5, 850], [2750, 3449, 7, 2600], [3450, 3799, 8, 900], [5010, 5179, 12, 700],
+  [5180, 5279, 13, 700], [6150, 6449, 20, 800], [9210, 9659, 28, 700], [37750, 38249, 38, 2600],
+  [38650, 39649, 40, 2300], [39650, 41589, 41, 2500], [41590, 43589, 42, 3500]];
+function band(earfcn) {
+  const b = BANDS.find(([lo, hi]) => earfcn >= lo && earfcn <= hi);
+  return b ? `band ${b[2]}, ${b[3]} MHz` : "";
+}
+
+const sameFreq = cells.map((c) => t.earfcn != null && c.earfcn === t.earfcn);
+const freqKnown = t.earfcn != null;
+if (!freqKnown) $("same-freq").checked = false;
+$("same-freq").disabled = !freqKnown;
+if (t.azimuth_deg == null) {
+  $("directional-label").textContent = "Antenna directions (rough estimate; none for this cell)";
+}
+if (!(t.unknown_12 > 0)) {
+  $("use-reach").disabled = true;
+  $("use-reach-label").textContent = "Field 12 not crawled yet for this cell";
+}
+$("same-freq-label").textContent = freqKnown
+  ? `Only cells on this cell's frequency (EARFCN ${t.earfcn})`
+  : "Frequency of this cell unknown: comparing with all cells";
+
+// indices of the cells this cell competes with (always includes the cell itself at 0)
+let active = [];
+function updateActive() {
+  const only = $("same-freq").checked;
+  active = cells.map((_, i) => i).filter((i) => i === 0 || !only || sameFreq[i]);
+}
+
+// typical spacing: median distance from each competing cell to its nearest neighbour
+function typicalSpacing() {
+  const nn = active.slice(0, 300).map((i) => {
+    let best = Infinity;
+    for (const j of active) {
+      if (j === i) continue;
+      const d = Math.hypot(cx[i] - cx[j], cy[i] - cy[j]);
+      if (d > 30 && d < best) best = d;
+    }
+    return best;
+  }).filter(Number.isFinite).sort((a, b) => a - b);
+  return nn.length ? nn[Math.floor(nn.length / 2)] : 1000;
+}
+function resetRange() {
+  updateActive();
+  const auto = Math.min(15000, Math.max(1500, 4 * typicalSpacing()));
+  $("range").value = (auto / 1000).toFixed(1);
+}
+resetRange();
+
+function params() {
+  const n = +$("n").value;
+  const sigma = +$("sigma").value;
+  const k = +$("k").value;
+  const range = +$("range").value * 1000;
+  // experimental: fade out at this cell's own reach (Apple's field 12) instead of the
+  // shared max range; competition between cells stays distance-based
+  const useReach = $("use-reach").checked && !Number.isNaN(reach[0]);
+  return {
+    n, sigma, k, range, useReach,
+    directional: $("directional").checked,
+    fade: useReach ? reach[0] : range,
+    view: document.querySelector("input[name=view]:checked").value,
+    // received power in dB is -10 n log10(d); a logit over powers with this temperature
+    // matches Gaussian signal variation of sigma dB
+    K: 10 * n / Math.LN10,
+    T: sigma * Math.sqrt(6) / Math.PI,
+  };
+}
+
+// sector antenna pattern (3GPP TR 36.814), as in src/coverage.rs: -12 (θ / 65°)² dB, at most
+// 20 dB down, for an angle θ off the antenna's direction
+function sectorGain(offAxis) {
+  const theta = ((offAxis + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+  return -Math.min(12 * (theta * 180 / Math.PI / 65) ** 2, 20);
+}
+
+const P = new Float64Array(cells.length);
+// returns { share, signal, best, bestShare } at metric point (x, y)
+function evaluate(x, y, p) {
+  const k2 = p.k * p.k;
+  let max = -p.K * Math.log(p.fade); // fade-out level acts as a "no service" competitor
+  const p0 = max;
+  let best = 0;
+  for (const j of active) {
+    const dx = x - cx[j], dy = y - cy[j];
+    const d2 = dx * dx + dy * dy + k2 * acc[j] * acc[j] + 1;
+    P[j] = -0.5 * p.K * Math.log(d2);
+    if (p.directional && !Number.isNaN(azimuth[j])) P[j] += sectorGain(Math.atan2(dx, dy) - azimuth[j]);
+    if (P[j] > P[best]) best = j;
+    if (P[j] > max) max = P[j];
+  }
+  let sum = Math.exp((p0 - max) / p.T);
+  for (const j of active) sum += Math.exp((P[j] - max) / p.T);
+  return {
+    share: Math.exp((P[0] - max) / p.T) / sum,
+    signal: P[0] - p0,
+    best,
+    bestShare: Math.exp((P[best] - max) / p.T) / sum,
+  };
+}
+
+function rampColor(v) {
+  const ramp = isDark() ? [...RAMP].reverse() : RAMP;
+  const f = Math.min(1, Math.max(0, v)) * (ramp.length - 1);
+  const i = Math.min(ramp.length - 2, Math.floor(f));
+  const a = ramp[i], b = ramp[i + 1], u = f - i;
+  const ch = (h, o) => parseInt(h.slice(o, o + 2), 16);
+  return [1, 3, 5].map((o) => Math.round(ch(a, o) * (1 - u) + ch(b, o) * u));
+}
+
+const canvas = document.createElement("canvas");
+canvas.width = canvas.height = GRID;
+let extent = 0;
+let stats = {};
+let styleReady = false;
+let fitted = false;
+
+function render() {
+  const p = params();
+  extent = Math.min(15000, Math.max(p.fade * 1.2, 1500));
+  const ctx = canvas.getContext("2d");
+  const img = ctx.createImageData(GRID, GRID);
+  const step = 2 * extent / GRID;
+  const values = new Float64Array(GRID * GRID);
+  let area = 0, reach = 0;
+  for (let row = 0; row < GRID; row++) {
+    const y = extent - (row + 0.5) * step;
+    for (let col = 0; col < GRID; col++) {
+      const x = -extent + (col + 0.5) * step;
+      const r = evaluate(x, y, p);
+      if (r.share > 0.5) {
+        area += step * step;
+        reach = Math.max(reach, Math.hypot(x, y));
+      }
+      const v = p.view === "share" ? r.share : r.signal / SIGNAL_DB;
+      values[row * GRID + col] = p.view === "share" ? r.share : r.signal;
+      const o = (row * GRID + col) * 4;
+      if (v < 0.02) continue;
+      const [cr, cg, cb] = rampColor(v);
+      img.data[o] = cr; img.data[o + 1] = cg; img.data[o + 2] = cb;
+      img.data[o + 3] = Math.round(255 * Math.min(0.8, 0.2 + 0.65 * Math.min(1, v)));
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  stats = { area, reach };
+  updateText(p);
+  const [north, west] = toLatLon(-extent, extent);
+  const [south, east] = toLatLon(extent, -extent);
+  const coordinates = [[west, north], [east, north], [east, south], [west, south]];
+  if (!styleReady) return;
+  const source = map.getSource("heat");
+  if (source) source.updateImage({ url: canvas.toDataURL(), coordinates });
+  else addLayers(coordinates);
+  map.getSource("contours").setData(contourLines(values, step, p));
+  map.setLayoutProperty("antenna", "visibility", p.directional ? "visible" : "none");
+  const visibility = $("contours").checked ? "visible" : "none";
+  for (const id of ["contour-lines", "contour-labels"]) map.setLayoutProperty(id, "visibility", visibility);
+  if (!fitted) {
+    fitted = true;
+    map.fitBounds([[west, south], [east, north]], { padding: 20, animate: false });
+  }
+}
+
+const SHARE_LEVELS = [0.1, 0.25, 0.5, 0.75, 0.9];
+const SIGNAL_LEVELS = [5, 10, 15, 20, 25, 30];
+
+// contour lines of the grid values, traced by d3-contour (the Rust --contours output uses its
+// port). d3 centres value i on pixel [i, i + 1], matching where the grid was sampled.
+function contourLines(values, step, p) {
+  const isShare = p.view === "share";
+  const levels = isShare ? SHARE_LEVELS : SIGNAL_LEVELS;
+  const toLngLat = ([px, py]) => {
+    const [lat, lon] = toLatLon(-extent + px * step, extent - py * step);
+    return [lon, lat];
+  };
+  const features = d3.contours().size([GRID, GRID]).thresholds(levels)(values)
+    .filter((c) => c.coordinates.length)
+    .map((c) => ({
+      type: "Feature",
+      geometry: { type: "MultiPolygon", coordinates: c.coordinates.map((poly) => poly.map((ring) => ring.map(toLngLat))) },
+      properties: {
+        label: isShare ? `${Math.round(c.value * 100)}%` : `${c.value} dB`,
+        // the 50% line is where this cell becomes the most likely server
+        major: isShare && c.value === 0.5,
+      },
+    }));
+  return { type: "FeatureCollection", features };
+}
+
+// competing cells in the cell colour, cells on other frequencies muted and smaller
+function styleCells() {
+  if (!map.getLayer("cells")) return;
+  const only = $("same-freq").checked;
+  map.setPaintProperty("cells", "circle-color", only ? ["case", ["get", "same"], css("--cell"), css("--muted")] : css("--cell"));
+  map.setPaintProperty("cells", "circle-radius", only ? ["case", ["get", "same"], 4, 3] : 4);
+}
+
+function fmtKm(m) { return m >= 1000 ? (m / 1000).toFixed(1) + " km" : Math.round(m) + " m"; }
+
+function updateText(p) {
+  $("n-out").textContent = p.n.toFixed(1);
+  $("sigma-out").textContent = p.sigma.toFixed(1);
+  $("k-out").textContent = p.k.toFixed(2);
+  $("range-out").textContent = p.useReach ? `${(p.fade / 1000).toFixed(1)} (field 12)` : (p.range / 1000).toFixed(1);
+  $("range").disabled = p.useReach;
+  $("stat-area").textContent = (stats.area / 1e6).toFixed(2) + " km²";
+  $("stat-cells").textContent = String(active.length - 1);
+  $("stat-cells-label").textContent = $("same-freq").checked
+    ? "cells on the same frequency modelled nearby"
+    : "same-operator cells modelled nearby";
+  $("other-freq-key").style.display = $("same-freq").checked ? "" : "none";
+  $("contour-key").style.display = $("contours").checked ? "" : "none";
+  $("contour-key-label").textContent = p.view === "share" ? "contours at 10, 25, 50, 75, 90%" : "contours every 5 dB";
+  styleCells();
+  $("stat-reach").textContent = stats.area ? fmtKm(stats.reach) : "none";
+  const isShare = p.view === "share";
+  $("legend-title").textContent = isShare
+    ? "Chance this cell is the strongest of its operator"
+    : "Modelled signal above edge of coverage";
+  const ramp = isDark() ? [...RAMP].reverse() : RAMP;
+  $("legend-ramp").style.background = `linear-gradient(to right, transparent, ${ramp.join(", ")})`;
+  const ticks = isShare ? ["0%", "25%", "50%", "75%", "100%"] : ["0 dB", "", "15 dB", "", "30+ dB"];
+  $("legend-ticks").replaceChildren(...ticks.map((s) => {
+    const span = document.createElement("span");
+    span.textContent = s;
+    return span;
+  }));
+}
+
+// a short line from this cell in its estimated antenna direction
+function antennaLine() {
+  if (Number.isNaN(azimuth[0])) return { type: "FeatureCollection", features: [] };
+  const [lat, lon] = toLatLon(300 * Math.sin(azimuth[0]), 300 * Math.cos(azimuth[0]));
+  return { type: "Feature", geometry: { type: "LineString", coordinates: [[t.lon, t.lat], [lon, lat]] }, properties: {} };
+}
+
+function circle(lat, lon, radius) {
+  const ring = [];
+  for (let i = 0; i <= 64; i++) {
+    const a = 2 * Math.PI * i / 64;
+    ring.push([lon + radius * Math.cos(a) / M_LON, lat + radius * Math.sin(a) / M_LAT]);
+  }
+  return { type: "Feature", geometry: { type: "Polygon", coordinates: [ring] }, properties: {} };
+}
+
+const pointFeatures = {
+  type: "FeatureCollection",
+  features: DATA.cells.map((c, i) => ({
+    type: "Feature",
+    geometry: { type: "Point", coordinates: [c.lon, c.lat] },
+    properties: { i: i + 1, same: sameFreq[i + 1] },
+  })),
+};
+
+// keyless vector basemap; it carries its own attribution
+function baseStyle() {
+  return `https://tiles.openfreemap.org/styles/${isDark() ? "dark" : "positron"}`;
+}
+
+function addLayers(coordinates) {
+  map.addSource("heat", { type: "image", url: canvas.toDataURL(), coordinates });
+  // below the basemap's labels so place names stay readable
+  const labels = map.getStyle().layers.find((l) => l.type === "symbol");
+  map.addLayer({ id: "heat", type: "raster", source: "heat", paint: { "raster-resampling": "linear", "raster-fade-duration": 0 } }, labels?.id);
+  map.addSource("contours", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  map.addLayer({
+    id: "contour-lines", type: "line", source: "contours",
+    paint: { "line-color": css("--text-secondary"), "line-width": ["case", ["get", "major"], 1.5, 0.75], "line-opacity": 0.9 },
+  });
+  map.addLayer({
+    id: "contour-labels", type: "symbol", source: "contours",
+    layout: {
+      "symbol-placement": "line", "symbol-spacing": 250, "text-field": ["get", "label"],
+      "text-font": ["Noto Sans Regular"], "text-size": 11, "text-keep-upright": true,
+    },
+    paint: { "text-color": css("--text-primary"), "text-halo-color": css("--surface-1"), "text-halo-width": 1.5 },
+  });
+  map.addSource("antenna", { type: "geojson", data: antennaLine() });
+  map.addLayer({ id: "antenna", type: "line", source: "antenna", paint: { "line-color": css("--target"), "line-width": 2 } });
+  map.addSource("acc", { type: "geojson", data: circle(t.lat, t.lon, acc[0]) });
+  map.addLayer({ id: "acc", type: "line", source: "acc", paint: { "line-color": css("--target"), "line-width": 1.5 } });
+  map.addSource("hover-acc", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  map.addLayer({ id: "hover-acc", type: "line", source: "hover-acc", paint: { "line-color": css("--cell"), "line-width": 1 } });
+  map.addSource("cells", { type: "geojson", data: pointFeatures });
+  map.addLayer({
+    id: "cells", type: "circle", source: "cells",
+    paint: { "circle-radius": 4, "circle-color": css("--cell"), "circle-stroke-width": 2, "circle-stroke-color": css("--surface-1") },
+  });
+  map.addSource("target", { type: "geojson", data: { type: "Feature", geometry: { type: "Point", coordinates: [t.lon, t.lat] }, properties: { i: 0 } } });
+  map.addLayer({
+    id: "target", type: "circle", source: "target",
+    paint: { "circle-radius": 6, "circle-color": css("--target"), "circle-stroke-width": 2, "circle-stroke-color": css("--surface-1") },
+  });
+  styleCells();
+}
+
+const map = new maplibregl.Map({ container: "map", style: baseStyle(), center: [t.lon, t.lat], zoom: 12 });
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }));
+// fires again after a theme change replaces the style, which drops our layers
+map.on("style.load", () => { styleReady = true; render(); });
+
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => map.setStyle(baseStyle()));
+
+$("same-freq").addEventListener("input", resetRange);
+let pending = false;
+for (const el of document.querySelectorAll(".controls input")) {
+  el.addEventListener("input", () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; render(); });
+  });
+}
+
+const site = (id) => Math.floor(id / 256);
+const sector = (id) => id % 256;
+function cellLabel(c) { return `cell ${c.cell_id} · TAC ${c.tac_id} · site ${site(c.cell_id)} / sector ${sector(c.cell_id)}`; }
+function radioLabel(c) {
+  if (c.earfcn == null) return "frequency unknown";
+  const b = band(c.earfcn);
+  return `EARFCN ${c.earfcn}${b ? " (" + b + ")" : ""} · PCI ${c.pci ?? "unknown"}`;
+}
+
+const tooltip = $("tooltip");
+function showTooltip(point, lines) {
+  tooltip.replaceChildren();
+  lines.forEach(([text, strong], i) => {
+    if (i) tooltip.appendChild(document.createElement("br"));
+    const el = document.createElement(strong ? "strong" : "span");
+    el.textContent = text;
+    tooltip.appendChild(el);
+  });
+  tooltip.style.display = "block";
+  const w = tooltip.offsetWidth, h = tooltip.offsetHeight;
+  const card = $("map");
+  const left = point.x + 14 + w > card.clientWidth ? point.x - 14 - w : point.x + 14;
+  const top = point.y + 14 + h > card.clientHeight ? point.y - 14 - h : point.y + 14;
+  tooltip.style.left = left + "px";
+  tooltip.style.top = top + "px";
+}
+
+map.on("mousemove", (e) => {
+  if (!map.getLayer("cells")) return;
+  const pad = 12;
+  const hits = map.queryRenderedFeatures(
+    [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]],
+    { layers: ["target", "cells"] },
+  );
+  const hover = map.getSource("hover-acc");
+  if (hits.length) {
+    const c = cells[hits[0].properties.i];
+    hover.setData(hits[0].properties.i === 0 ? { type: "FeatureCollection", features: [] } : circle(c.lat, c.lon, acc[hits[0].properties.i]));
+    showTooltip(e.point, [
+      [`accuracy ${c.acc != null ? Math.round(c.acc) + " m" : "unknown"}`, true],
+      [cellLabel(c)],
+      [radioLabel(c)],
+      [`field 12 (reach?) ${c.unknown_12 != null ? fmtKm(c.unknown_12) : "unknown"}`],
+      [`antenna direction ${c.azimuth_deg != null ? Math.round(c.azimuth_deg) + "° (estimate)" : "unknown"}`],
+      [`crawled ${c.crawled_at ? c.crawled_at.slice(0, 16).replace("T", " ") + " UTC" : "before crawl times were recorded"}`],
+      [hits[0].properties.i === 0 ? "the cell this map is for" : `${fmtKm(c.dist)} from this cell`],
+    ]);
+    map.getCanvas().style.cursor = "pointer";
+    return;
+  }
+  hover.setData({ type: "FeatureCollection", features: [] });
+  map.getCanvas().style.cursor = "";
+  const p = params();
+  const [x, y] = toXY(e.lngLat.lat, e.lngLat.lng);
+  const r = evaluate(x, y, p);
+  const best = cells[r.best];
+  showTooltip(e.point, [
+    [`${Math.round(r.share * 100)}% likely served by this cell`, true],
+    [`signal ${r.signal >= 0 ? "+" : ""}${r.signal.toFixed(1)} dB vs edge of coverage`],
+    [`${fmtKm(Math.hypot(x, y))} from this cell`],
+    [r.best === 0 ? "this cell is the most likely server here" : `most likely server: cell ${best.cell_id} (${Math.round(r.bestShare * 100)}%)`],
+  ]);
+});
+map.getContainer().addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+
+$("title").textContent = `Estimated coverage of cell ${t.cell_id}`;
+$("subtitle").textContent = `MCC ${t.mcc} · MNC ${t.mnc} · TAC ${t.tac_id} · site ${site(t.cell_id)}, sector ${sector(t.cell_id)} · ` +
+  `${radioLabel(t)} · ` +
+  `${t.lat.toFixed(5)}, ${t.lon.toFixed(5)} · data from ${DATA.generated}`;
+$("stat-acc").textContent = t.acc != null ? Math.round(t.acc) + " m" : "unknown";
+
+const tbody = $("table-body");
+for (const c of cells.slice(0, 100)) {
+  const tr = document.createElement("tr");
+  const values = [c.cell_id, c.tac_id, site(c.cell_id), sector(c.cell_id),
+                  c.earfcn ?? "unknown", c.earfcn != null ? band(c.earfcn) : "", c.pci ?? "unknown", Math.round(c.dist),
+                  c.acc != null ? Math.round(c.acc) : "unknown", c.lat.toFixed(6), c.lon.toFixed(6),
+                  c.crawled_at ? c.crawled_at.slice(0, 16).replace("T", " ") : "unknown"];
+  for (const v of values) {
+    const td = document.createElement("td");
+    td.textContent = String(v);
+    tr.appendChild(td);
+  }
+  tbody.appendChild(tr);
+}
+</script>
+</body>
+</html>

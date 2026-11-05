@@ -179,12 +179,12 @@ With `--contours`, the coverage is written as contour bands (`role: "contour"`) 
 
 #### Running the database with Docker Compose
 
-You don't need a local Postgres or the SQLx CLI to run the crawler; wtfps creates and updates its tables itself on startup. `docker-compose.yml` runs the `postgis/postgis` image, which provides Postgres with PostGIS, and `psql` runs inside the container. The data lives in the named volume `postgis_data`, so it survives `docker compose down`, restarts and image updates; only `docker compose down -v` deletes it. The port is bound to localhost only; set `WTFPS_DB_PORT` to use another one, and `POSTGRES_PASSWORD` to change the password.
+You don't need a local Postgres or the SQLx CLI to run the crawler; wtfps creates and updates its tables itself on startup. `docker-compose.yml` runs the `postgis/postgis` image, which provides Postgres with PostGIS, and `psql` runs inside the container. The data lives in the named volume `postgis_data`, so it survives `docker compose down`, restarts and image updates; only `docker compose down -v` deletes it. The port is bound to localhost only. `.env.example` lists the settings: copied to `.env`, both `docker compose` and wtfps read it, and `DATABASE_URL` is built from `POSTGRES_USER`, `POSTGRES_PASSWORD`, `WTFPS_DB_PORT` and `POSTGRES_DB`, so changing one keeps the two in step. The password only takes effect when the volume is first created.
 
 ```sh
 # 1. start the database (waits until it accepts connections)
+cp .env.example .env      # settings for both wtfps and docker compose
 docker compose up -d --wait
-echo 'DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/wtfps' > .env
 
 # 2. build; SQLX_OFFLINE uses the saved query metadata in .sqlx/ instead of a live database
 SQLX_OFFLINE=true cargo build --release

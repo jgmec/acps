@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cell coverage estimate</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.1.3/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@4.1.3/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/d3-array@3.2.4/dist/d3-array.min.js"></script>
+<script src="https://unpkg.com/d3-contour@4.0.2/dist/d3-contour.min.js"></script>
+<style>
+.viz-root {
+  color-scheme: light;
+  --surface-1: #fcfcfb;
+  --page: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --muted: #898781;
+  --gridline: #e1e0d9;
+  --border: rgba(11, 11, 11, 0.10);
+  --target: #eb6834;
+  --cell: #52514e;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --page: #0d0d0d;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --gridline: #2c2c2a;
+    --border: rgba(255, 255, 255, 0.10);
+    --target: #d95926;
+    --cell: #c3c2b7;
+  }
+}
+:root[data-theme="dark"] .viz-root {
+  color-scheme: dark;
+  --surface-1: #1a1a19;
+  --page: #0d0d0d;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --gridline: #2c2c2a;
+  --border: rgba(255, 255, 255, 0.10);
+  --target: #d95926;
+  --cell: #c3c2b7;
+}
+body { margin: 0; }
+.viz-root {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--page);
+  color: var(--text-primary);
+  min-height: 100vh;
+  padding: 16px 20px 32px;
+  box-sizing: border-box;
+}
+h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+.sub { margin: 0 0 16px; color: var(--text-secondary); font-size: 13px; }
+.stats { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.stat {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  min-width: 150px;
+}
+.stat .value { font-size: 22px; font-weight: 600; }
+.stat .label { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  align-items: flex-end;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.controls label { display: flex; flex-direction: column; gap: 4px; }
+.controls output { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.controls fieldset { border: 0; padding: 0; margin: 0; display: flex; gap: 12px; }
+.controls legend { padding: 0; margin-bottom: 4px; }
+.card {
+  position: relative;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+#map { height: 68vh; min-height: 420px; }
+.legend {
+  position: absolute;
+  left: 12px;
+  bottom: 28px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  z-index: 2;
+}
+.legend .title { color: var(--text-primary); margin-bottom: 6px; }
+.legend .ramp { width: 220px; height: 10px; border-radius: 2px; }
+.legend .ticks {
+  display: flex;
+  justify-content: space-between;
+  width: 220px;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.legend .keys { display: flex; gap: 14px; margin-top: 8px; }
+.legend .key { display: flex; align-items: center; gap: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 0 2px var(--surface-1); }
+.line-key { width: 14px; height: 0; border-top: 1.5px solid var(--text-secondary); }
+.ring { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--target); }
+.tooltip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 3;
+  display: none;
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  white-space: nowrap;
+}
+.tooltip strong { color: var(--text-primary); font-size: 14px; }
+details { margin-top: 16px; font-size: 13px; }
+summary { cursor: pointer; color: var(--text-secondary); }
+table { border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 4px 10px; border-bottom: 1px solid var(--gridline); }
+th { color: var(--text-secondary); font-weight: 500; }
+.note { margin-top: 16px; font-size: 12px; color: var(--text-secondary); max-width: 900px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <h1 id="title"></h1>
+  <p class="sub" id="subtitle"></p>
+
+  <div class="stats">
+    <div class="stat"><div class="value" id="stat-area"></div><div class="label">area where this cell is the most likely server (&gt;50%)</div></div>
+    <div class="stat"><div class="value" id="stat-reach"></div><div class="label">furthest point with &gt;50% likelihood</div></div>
+    <div class="stat"><div class="value" id="stat-acc"></div><div class="label">Apple's location accuracy for this cell</div></div>
+    <div class="stat"><div class="value" id="stat-cells"></div><div class="label" id="stat-cells-label">same-operator cells modelled nearby</div></div>
+  </div>
+
+  <div class="controls">
+    <fieldset>
+      <legend>Show</legend>
+      <label style="flex-direction:row;align-items:center"><input type="radio" name="view" value="share" checked> Serving likelihood</label>
+      <label style="flex-direction:row;align-items:center"><input type="radio" name="view" value="signal"> Relative signal</label>
+    </fieldset>
+    <label>Path-loss exponent <output id="n-out"></output><input id="n" type="range" min="2" max="5" step="0.1" value="3.5"></label>
+    <label>Signal variation (dB) <output id="sigma-out"></output><input id="sigma" type="range" min="2" max="14" step="0.5" value="8"></label>
+    <label>Accuracy weight <output id="k-out"></output><input id="k" type="range" min="0" max="1" step="0.05" value="0"></label>
+    <label>Max range (km) <output id="range-out"></output><input id="range" type="range" min="0.5" max="20" step="0.1"></label>
+    <label style="flex-direction:row;align-items:center"><input type="checkbox" id="same-freq" checked> <span id="same-freq-label"></span></label>
+    <label style="flex-direction:row;align-items:center"><input type="checkbox" id="contours" checked> Contour lines</label>
+    <label style="flex-direction:row;align-items:center"><input type="checkbox" id="directional"> <span id="directional-label">Antenna directions (rough estimate)</span></label>
+    <label style="flex-direction:row;align-items:center"><input type="checkbox" id="use-reach"> <span id="use-reach-label">Fade out at this cell's reach from Apple's field 12 (experimental)</span></label>
+  </div>
+
+  <div class="card">
+    <div id="map" role="img" aria-label="Map of the estimated coverage of the selected cell"></div>
+    <div class="legend">
+      <div class="title" id="legend-title"></div>
+      <div class="ramp" id="legend-ramp"></div>
+      <div class="ticks" id="legend-ticks"></div>
+      <div class="keys">
+        <span class="key"><span class="dot" style="background:var(--target)"></span>this cell</span>
+        <span class="key"><span class="ring"></span>its accuracy</span>
+        <span class="key"><span class="dot" style="background:var(--cell)"></span>competing cells</span>
+        <span class="key" id="contour-key"><span class="line-key"></span><span id="contour-key-label"></span></span>
+        <span class="key" id="other-freq-key"><span class="dot" style="background:var(--muted)"></span>other frequencies</span>
+      </div>
+    </div>
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+
+  <details>
+    <summary>Table: this cell and the nearest cells of the same operator</summary>
+    <table>
+      <thead><tr><th>Cell ID</th><th>TAC</th><th>Site</th><th>Sector</th><th>EARFCN</th><th>Band</th><th>PCI</th><th>Distance (m)</th><th>Accuracy (m)</th><th>Latitude</th><th>Longitude</th><th>Crawled (UTC)</th></tr></thead>
+      <tbody id="table-body"></tbody>
+    </table>
+  </details>
+
+  <p class="note">
+    This is a model, not a measurement. Each cell's position is Apple's estimate of where the cell is used, not the
+    tower location. Signal is modelled as falling off with distance (path-loss exponent: about 2 in open country,
+    3–4 in towns), and a phone is assumed to use whichever cell of its operator is strongest, allowing for random
+    signal variation from buildings and terrain. <em>Serving likelihood</em> is the chance this cell is the strongest at
+    a spot. <em>Relative signal</em> is this cell's modelled level above the edge of coverage, ignoring other cells.
+    Accuracy weight blurs each cell's position by its accuracy; at 0 positions are taken as exact. Max range is the
+    distance at which signal is assumed to fade out; it starts from 4× the typical spacing between nearby cells.
+    Antenna directions (off by default) give each sector a wedge-shaped antenna pattern, pointing from its site's
+    centre towards the sector's position. Apple places sectors where phones saw them, which is partly in the direction
+    the antenna faces, but it's a rough estimate: on real three-sector sites the estimated directions are only somewhat
+    more evenly spread than random ones. Cells whose direction can't be estimated stay round.
+    The experimental field 12 option fades this cell out at its own reach instead: an undocumented number from
+    Apple's reply that grows with the spacing between cells like a coverage radius, though its meaning is a guess.
+    Operators run several frequency layers over the same area and a phone doesn't choose between layers by
+    distance, so by default this cell only competes with cells on its own frequency (EARFCN); cells whose frequency
+    isn't known yet are left out until the crawler sees them again. Cells Apple doesn't know, or that the crawler
+    hasn't found yet, are missing from the model.
+  </p>
+</div>
+
+<script>
+"use strict";
+const DATA = {"cells":[{"acc":1414,"azimuth_deg":null,"cell_id":141721611,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.92737865,"lon":108.11781311,"mcc":452,"mnc":1,"pci":446,"tac_id":62400,"unknown_12":2055},{"acc":1414,"azimuth_deg":null,"cell_id":141700876,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.93173503,"lon":108.12136840000001,"mcc":452,"mnc":1,"pci":141,"tac_id":62400,"unknown_12":444},{"acc":1414,"azimuth_deg":null,"cell_id":141700906,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1874,"lat":10.93227577,"lon":108.12136840000001,"mcc":452,"mnc":1,"pci":141,"tac_id":62400,"unknown_12":960},{"acc":1414,"azimuth_deg":291.0,"cell_id":140827661,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.93084907,"lon":108.11544036000001,"mcc":452,"mnc":1,"pci":263,"tac_id":62400,"unknown_12":527},{"acc":1414,"azimuth_deg":null,"cell_id":141705739,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.93709468,"lon":108.11741638000001,"mcc":452,"mnc":1,"pci":342,"tac_id":62400,"unknown_12":3222},{"acc":1414,"azimuth_deg":68.0,"cell_id":141699339,"crawled_at":null,"earfcn":null,"lat":10.93031978,"lon":108.11093139,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":351},{"acc":1414,"azimuth_deg":99.0,"cell_id":140970508,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.93793678,"lon":108.11732482000001,"mcc":452,"mnc":1,"pci":241,"tac_id":62400,"unknown_12":1033},{"acc":1414,"azimuth_deg":169.0,"cell_id":141699340,"crawled_at":null,"earfcn":null,"lat":10.92636203,"lon":108.10950469000001,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":351},{"acc":1414,"azimuth_deg":null,"cell_id":141717003,"crawled_at":null,"earfcn":null,"lat":10.93455505,"lon":108.1103363,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":556},{"acc":1414,"azimuth_deg":312.0,"cell_id":141699371,"crawled_at":null,"earfcn":null,"lat":10.93041992,"lon":108.10784149,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":2290},{"acc":1414,"azimuth_deg":250.0,"cell_id":140970509,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.93768692,"lon":108.1107788,"mcc":452,"mnc":1,"pci":242,"tac_id":62400,"unknown_12":827},{"acc":1414,"azimuth_deg":312.0,"cell_id":141699341,"crawled_at":null,"earfcn":null,"lat":10.93096065,"lon":108.10723114,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":2142},{"acc":1414,"azimuth_deg":316.0,"cell_id":140970537,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1874,"lat":10.94008159,"lon":108.11183166,"mcc":452,"mnc":1,"pci":240,"tac_id":62400,"unknown_12":641},{"acc":1414,"azimuth_deg":null,"cell_id":141701132,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.93777084,"lon":108.10866546,"mcc":452,"mnc":1,"pci":163,"tac_id":62400,"unknown_12":817},{"acc":1414,"azimuth_deg":125.0,"cell_id":141703180,"crawled_at":null,"earfcn":null,"lat":10.92419052,"lon":108.10666656000001,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":293},{"acc":1414,"azimuth_deg":null,"cell_id":141707050,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1874,"lat":10.93346881,"lon":108.10614776,"mcc":452,"mnc":1,"pci":42,"tac_id":62400,"unknown_12":490},{"acc":1414,"azimuth_deg":305.0,"cell_id":141703181,"crawled_at":null,"earfcn":null,"lat":10.925518030000001,"lon":108.10471343,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":412},{"acc":1414,"azimuth_deg":null,"cell_id":141717771,"crawled_at":null,"earfcn":null,"lat":10.93750572,"lon":108.13233184,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":452},{"acc":1414,"azimuth_deg":null,"cell_id":140975885,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.94260215,"lon":108.10967254,"mcc":452,"mnc":1,"pci":213,"tac_id":62400,"unknown_12":395},{"acc":1414,"azimuth_deg":null,"cell_id":141699853,"crawled_at":null,"earfcn":1501,"lat":10.9318571,"lon":108.1023941,"mcc":452,"mnc":1,"pci":99,"tac_id":62400,"unknown_12":810},{"acc":1414,"azimuth_deg":null,"cell_id":141699883,"crawled_at":null,"earfcn":1874,"lat":10.932100290000001,"lon":108.10234069,"mcc":452,"mnc":1,"pci":99,"tac_id":62400,"unknown_12":1335},{"acc":1414,"azimuth_deg":null,"cell_id":140838413,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.93267059,"lon":108.13691711,"mcc":452,"mnc":1,"pci":38,"tac_id":62400,"unknown_12":2942},{"acc":1414,"azimuth_deg":null,"cell_id":141095692,"crawled_at":null,"earfcn":1501,"lat":10.93349075,"lon":108.10129547,"mcc":452,"mnc":1,"pci":385,"tac_id":62400,"unknown_12":1124},{"acc":1414,"azimuth_deg":163.0,"cell_id":140823820,"crawled_at":null,"earfcn":null,"lat":10.93717288,"lon":108.13628387,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":1031},{"acc":1414,"azimuth_deg":null,"cell_id":142029580,"crawled_at":null,"earfcn":null,"lat":10.94016838,"lon":108.10366821000001,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":334},{"acc":1414,"azimuth_deg":343.0,"cell_id":140823821,"crawled_at":null,"earfcn":null,"lat":10.94045543,"lon":108.13526916,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":949},{"acc":1414,"azimuth_deg":159.0,"cell_id":141697548,"crawled_at":null,"earfcn":null,"lat":10.93053913,"lon":108.09929656,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":738},{"acc":1414,"azimuth_deg":339.0,"cell_id":141697547,"crawled_at":null,"earfcn":null,"lat":10.932811730000001,"lon":108.09840393,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":394},{"acc":1414,"azimuth_deg":239.0,"cell_id":141702669,"crawled_at":"2026-11-05T22:00:29Z","earfcn":null,"lat":10.93434333,"lon":108.14040374,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":477},{"acc":1414,"azimuth_deg":184.0,"cell_id":141698828,"crawled_at":null,"earfcn":null,"lat":10.93676853,"lon":108.0985794,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":1044},{"acc":1522,"azimuth_deg":112.0,"cell_id":141703692,"crawled_at":null,"earfcn":null,"lat":10.92249107,"lon":108.09708404,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":5990},{"acc":1414,"azimuth_deg":4.0,"cell_id":141698827,"crawled_at":null,"earfcn":null,"lat":10.94066905,"lon":108.09886932,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":631},{"acc":1414,"azimuth_deg":4.0,"cell_id":141702667,"crawled_at":"2026-11-05T22:00:29Z","earfcn":null,"lat":10.93765735,"lon":108.14206695,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":766},{"acc":2181,"azimuth_deg":140.0,"cell_id":141702668,"crawled_at":"2026-11-05T22:00:29Z","earfcn":null,"lat":10.933631890000001,"lon":108.14323425,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":7856},{"acc":1749,"azimuth_deg":292.0,"cell_id":141703693,"crawled_at":null,"earfcn":null,"lat":10.92366218,"lon":108.09407806,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":6661},{"acc":1414,"azimuth_deg":207.0,"cell_id":141766412,"crawled_at":null,"earfcn":null,"lat":10.955000870000001,"lon":108.11650848000001,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":1422},{"acc":1414,"azimuth_deg":null,"cell_id":141706007,"crawled_at":null,"earfcn":1501,"lat":10.95135211,"lon":108.10168457,"mcc":452,"mnc":1,"pci":269,"tac_id":62400,"unknown_12":1110},{"acc":1414,"azimuth_deg":null,"cell_id":142029325,"crawled_at":null,"earfcn":1501,"lat":10.9192295,"lon":108.0919342,"mcc":452,"mnc":1,"pci":74,"tac_id":62400,"unknown_12":358},{"acc":1414,"azimuth_deg":168.0,"cell_id":141698572,"crawled_at":null,"earfcn":null,"lat":10.9442377,"lon":108.09192657,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":1456},{"acc":20781,"azimuth_deg":27.0,"cell_id":141766411,"crawled_at":null,"earfcn":null,"lat":10.96046352,"lon":108.11940002,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":65097},{"acc":1414,"azimuth_deg":null,"cell_id":141764877,"crawled_at":null,"earfcn":null,"lat":10.95536327,"lon":108.13777923,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":944},{"acc":1414,"azimuth_deg":348.0,"cell_id":141698571,"crawled_at":null,"earfcn":null,"lat":10.94587802,"lon":108.09157562,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":1598},{"acc":1414,"azimuth_deg":null,"cell_id":252986223,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.96247386,"lon":108.12366485,"mcc":452,"mnc":1,"pci":456,"tac_id":62440,"unknown_12":1517},{"acc":1414,"azimuth_deg":177.0,"cell_id":141701644,"crawled_at":null,"earfcn":null,"lat":10.93164634,"lon":108.08377838,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":1389},{"acc":1414,"azimuth_deg":null,"cell_id":141707277,"crawled_at":null,"earfcn":1501,"lat":10.93880844,"lon":108.08498382,"mcc":452,"mnc":1,"pci":182,"tac_id":62400,"unknown_12":1419},{"acc":1414,"azimuth_deg":357.0,"cell_id":141701643,"crawled_at":null,"earfcn":null,"lat":10.93499565,"lon":108.08357238,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":814},{"acc":1414,"azimuth_deg":341.0,"cell_id":141696781,"crawled_at":null,"earfcn":1501,"lat":10.91845893,"lon":108.08477783000001,"mcc":452,"mnc":1,"pci":310,"tac_id":62400,"unknown_12":603},{"acc":1414,"azimuth_deg":161.0,"cell_id":141696780,"crawled_at":null,"earfcn":1501,"lat":10.91597557,"lon":108.08563995,"mcc":452,"mnc":1,"pci":311,"tac_id":62400,"unknown_12":4967},{"acc":1414,"azimuth_deg":null,"cell_id":141767180,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.96280193,"lon":108.13375854,"mcc":452,"mnc":1,"pci":347,"tac_id":62440,"unknown_12":1144},{"acc":1414,"azimuth_deg":null,"cell_id":141730827,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.93910121,"lon":108.15505218,"mcc":452,"mnc":1,"pci":102,"tac_id":62400,"unknown_12":2753},{"acc":1414,"azimuth_deg":null,"cell_id":141728269,"crawled_at":null,"earfcn":null,"lat":10.96101474,"lon":108.09996795,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":1614},{"acc":1414,"azimuth_deg":null,"cell_id":228404236,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.96718883,"lon":108.11010742,"mcc":452,"mnc":1,"pci":316,"tac_id":62440,"unknown_12":1007},{"acc":1414,"azimuth_deg":79.0,"cell_id":141716237,"crawled_at":null,"earfcn":1501,"lat":10.9190483,"lon":108.07975769000001,"mcc":452,"mnc":1,"pci":197,"tac_id":62400,"unknown_12":971},{"acc":1414,"azimuth_deg":28.0,"cell_id":141998091,"crawled_at":null,"earfcn":1501,"lat":10.91080474,"lon":108.08097839,"mcc":452,"mnc":1,"pci":426,"tac_id":62400,"unknown_12":2500},{"acc":1414,"azimuth_deg":126.0,"cell_id":141716236,"crawled_at":null,"earfcn":1501,"lat":10.91579437,"lon":108.07712554,"mcc":452,"mnc":1,"pci":195,"tac_id":62400,"unknown_12":790},{"acc":1414,"azimuth_deg":189.0,"cell_id":141766156,"crawled_at":null,"earfcn":null,"lat":10.967294690000001,"lon":108.14485931,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":4839},{"acc":1414,"azimuth_deg":null,"cell_id":141701388,"crawled_at":null,"earfcn":null,"lat":10.92241573,"lon":108.07349395,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":656},{"acc":24389,"azimuth_deg":null,"cell_id":141717515,"crawled_at":null,"earfcn":1501,"lat":10.94287681,"lon":108.07450866,"mcc":452,"mnc":1,"pci":357,"tac_id":62400,"unknown_12":74523},{"acc":1414,"azimuth_deg":175.0,"cell_id":140819468,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.97501373,"lon":108.13330078,"mcc":452,"mnc":1,"pci":439,"tac_id":62440,"unknown_12":3350},{"acc":1414,"azimuth_deg":138.0,"cell_id":140822796,"crawled_at":null,"earfcn":null,"lat":10.97287845,"lon":108.09768676,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":3832},{"acc":1414,"azimuth_deg":null,"cell_id":141706765,"crawled_at":null,"earfcn":null,"lat":10.95096397,"lon":108.07448577,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":1863},{"acc":1414,"azimuth_deg":178.0,"cell_id":141765644,"crawled_at":null,"earfcn":null,"lat":10.96749019,"lon":108.08663177,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":1699},{"acc":1414,"azimuth_deg":174.0,"cell_id":141698316,"crawled_at":null,"earfcn":null,"lat":10.93834972,"lon":108.16942596,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":781},{"acc":1414,"azimuth_deg":354.0,"cell_id":141698315,"crawled_at":null,"earfcn":null,"lat":10.94226837,"lon":108.16903686,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":1161},{"acc":1414,"azimuth_deg":null,"cell_id":141095947,"crawled_at":null,"earfcn":1501,"lat":10.91862583,"lon":108.06703186,"mcc":452,"mnc":1,"pci":318,"tac_id":62400,"unknown_12":1718},{"acc":1414,"azimuth_deg":9.0,"cell_id":141766155,"crawled_at":null,"earfcn":null,"lat":10.97657966,"lon":108.1463623,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":2102},{"acc":1414,"azimuth_deg":278.0,"cell_id":141716245,"crawled_at":null,"earfcn":1501,"lat":10.91912651,"lon":108.06536865,"mcc":452,"mnc":1,"pci":21,"tac_id":62400,"unknown_12":2043},{"acc":1482,"azimuth_deg":null,"cell_id":141760524,"crawled_at":null,"earfcn":1501,"lat":10.94804191,"lon":108.06653594000001,"mcc":452,"mnc":1,"pci":448,"tac_id":62440,"unknown_12":5868},{"acc":1414,"azimuth_deg":85.0,"cell_id":141715211,"crawled_at":null,"earfcn":1501,"lat":10.92675971,"lon":108.06170654,"mcc":452,"mnc":1,"pci":306,"tac_id":62450,"unknown_12":875},{"acc":1972,"azimuth_deg":358.0,"cell_id":141765643,"crawled_at":null,"earfcn":null,"lat":10.97897243,"lon":108.08615875,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":7291},{"acc":1414,"azimuth_deg":null,"cell_id":142030348,"crawled_at":null,"earfcn":null,"lat":10.93698024,"lon":108.17942047,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":514},{"acc":24150,"azimuth_deg":61.0,"cell_id":141700363,"crawled_at":null,"earfcn":1501,"lat":10.90484428,"lon":108.06310272,"mcc":452,"mnc":1,"pci":78,"tac_id":62400,"unknown_12":71621},{"acc":24191,"azimuth_deg":355.0,"cell_id":140819467,"crawled_at":null,"earfcn":null,"lat":10.98916625,"lon":108.13214111,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":61482},{"acc":1414,"azimuth_deg":null,"cell_id":141763596,"crawled_at":null,"earfcn":null,"lat":10.9834671,"lon":108.14983367,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":1870},{"acc":1414,"azimuth_deg":null,"cell_id":228409099,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.99145698,"lon":108.11656188,"mcc":452,"mnc":1,"pci":70,"tac_id":62440,"unknown_12":2494},{"acc":1522,"azimuth_deg":318.0,"cell_id":140822797,"crawled_at":null,"earfcn":null,"lat":10.98361968,"lon":108.08795166,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":5990},{"acc":23171,"azimuth_deg":208.0,"cell_id":141998092,"crawled_at":null,"earfcn":1501,"lat":10.88949298,"lon":108.06961822,"mcc":452,"mnc":1,"pci":427,"tac_id":62400,"unknown_12":132577},{"acc":1414,"azimuth_deg":null,"cell_id":228403979,"crawled_at":null,"earfcn":null,"lat":10.97586727,"lon":108.1641159,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":1149},{"acc":1414,"azimuth_deg":187.0,"cell_id":141769740,"crawled_at":null,"earfcn":null,"lat":10.96068191,"lon":108.06009674,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":3365},{"acc":1414,"azimuth_deg":265.0,"cell_id":141715213,"crawled_at":null,"earfcn":1501,"lat":10.925984380000001,"lon":108.05181121,"mcc":452,"mnc":1,"pci":308,"tac_id":62450,"unknown_12":3184},{"acc":19602,"azimuth_deg":185.0,"cell_id":140822540,"crawled_at":null,"earfcn":null,"lat":10.95835113,"lon":108.0582199,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":63069},{"acc":1414,"azimuth_deg":null,"cell_id":228404747,"crawled_at":null,"earfcn":null,"lat":10.98201179,"lon":108.07441711,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":1734},{"acc":2654,"azimuth_deg":171.0,"cell_id":141700364,"crawled_at":null,"earfcn":1501,"lat":10.89138889,"lon":108.05723571,"mcc":452,"mnc":1,"pci":79,"tac_id":62400,"unknown_12":9114},{"acc":1414,"azimuth_deg":7.0,"cell_id":141769739,"crawled_at":null,"earfcn":null,"lat":10.97595787,"lon":108.0619812,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":1502},{"acc":17591,"azimuth_deg":171.0,"cell_id":141700394,"crawled_at":null,"earfcn":1874,"lat":10.88683509,"lon":108.05780029,"mcc":452,"mnc":1,"pci":79,"tac_id":62400,"unknown_12":42384},{"acc":2828,"azimuth_deg":310.0,"cell_id":141700365,"crawled_at":null,"earfcn":null,"lat":10.90841484,"lon":108.04644775,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":8497},{"acc":1414,"azimuth_deg":null,"cell_id":142000651,"crawled_at":null,"earfcn":1501,"lat":10.94395256,"lon":108.19618225,"mcc":452,"mnc":1,"pci":252,"tac_id":62400,"unknown_12":386},{"acc":1414,"azimuth_deg":188.0,"cell_id":141762572,"crawled_at":null,"earfcn":null,"lat":10.9969778,"lon":108.15948486,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":1517},{"acc":1414,"azimuth_deg":241.0,"cell_id":141698061,"crawled_at":null,"earfcn":1501,"lat":10.94538879,"lon":108.19739532,"mcc":452,"mnc":1,"pci":405,"tac_id":62400,"unknown_12":3331},{"acc":1414,"azimuth_deg":161.0,"cell_id":141698060,"crawled_at":null,"earfcn":1501,"lat":10.94616222,"lon":108.19995117,"mcc":452,"mnc":1,"pci":407,"tac_id":62400,"unknown_12":325},{"acc":5200,"azimuth_deg":null,"cell_id":141773324,"crawled_at":null,"earfcn":1501,"lat":10.92695903,"lon":108.03599548,"mcc":452,"mnc":1,"pci":118,"tac_id":62450,"unknown_12":14611},{"acc":1414,"azimuth_deg":null,"cell_id":228412429,"crawled_at":null,"earfcn":1501,"lat":11.010150900000001,"lon":108.09780883,"mcc":452,"mnc":1,"pci":140,"tac_id":62440,"unknown_12":4109},{"acc":1414,"azimuth_deg":51.0,"cell_id":141698089,"crawled_at":null,"earfcn":1874,"lat":10.94842624,"lon":108.20198822,"mcc":452,"mnc":1,"pci":406,"tac_id":62400,"unknown_12":1399},{"acc":1414,"azimuth_deg":246.0,"cell_id":141767949,"crawled_at":null,"earfcn":null,"lat":11.01345062,"lon":108.1180725,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":2818},{"acc":1414,"azimuth_deg":8.0,"cell_id":141762571,"crawled_at":null,"earfcn":null,"lat":11.00515937,"lon":108.16064453,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":1344},{"acc":5185,"azimuth_deg":148.0,"cell_id":140823052,"crawled_at":null,"earfcn":1501,"lat":11.01132297,"lon":108.09192657,"mcc":452,"mnc":1,"pci":259,"tac_id":62440,"unknown_12":14580},{"acc":1809,"azimuth_deg":66.0,"cell_id":141767947,"crawled_at":null,"earfcn":null,"lat":11.01773929,"lon":108.12799835,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":6833},{"acc":2665,"azimuth_deg":null,"cell_id":142000397,"crawled_at":null,"earfcn":1501,"lat":10.86543846,"lon":108.05451202,"mcc":452,"mnc":1,"pci":229,"tac_id":62400,"unknown_12":9767},{"acc":9164,"azimuth_deg":5.0,"cell_id":140822539,"crawled_at":null,"earfcn":null,"lat":11.00267601,"lon":108.06256103,"mcc":452,"mnc":1,"pci":null,"tac_id":62440,"unknown_12":0},{"acc":7327,"azimuth_deg":352.0,"cell_id":140809769,"crawled_at":null,"earfcn":1874,"lat":10.87147903,"lon":108.04457092,"mcc":452,"mnc":1,"pci":53,"tac_id":62400,"unknown_12":25607},{"acc":1414,"azimuth_deg":null,"cell_id":141763852,"crawled_at":null,"earfcn":1501,"lat":11.02549934,"lon":108.12700653,"mcc":452,"mnc":1,"pci":202,"tac_id":62440,"unknown_12":2840},{"acc":1414,"azimuth_deg":null,"cell_id":142001419,"crawled_at":null,"earfcn":1501,"lat":10.95390987,"lon":108.21607971,"mcc":452,"mnc":1,"pci":420,"tac_id":62400,"unknown_12":1685},{"acc":19006,"azimuth_deg":null,"cell_id":141307917,"crawled_at":null,"earfcn":1501,"lat":11.021262160000001,"lon":108.16066741,"mcc":452,"mnc":1,"pci":360,"tac_id":62440,"unknown_12":39367},{"acc":1414,"azimuth_deg":269.0,"cell_id":141702413,"crawled_at":null,"earfcn":1501,"lat":10.95561981,"lon":108.21868133,"mcc":452,"mnc":1,"pci":281,"tac_id":62400,"unknown_12":3752},{"acc":2517,"azimuth_deg":null,"cell_id":141773101,"crawled_at":null,"earfcn":1874,"lat":10.92404747,"lon":108.01519012,"mcc":452,"mnc":1,"pci":352,"tac_id":62450,"unknown_12":8728},{"acc":1414,"azimuth_deg":null,"cell_id":141697066,"crawled_at":null,"earfcn":1874,"lat":10.855076780000001,"lon":108.04685211,"mcc":452,"mnc":1,"pci":379,"tac_id":62400,"unknown_12":2106},{"acc":1414,"azimuth_deg":null,"cell_id":141697036,"crawled_at":null,"earfcn":1501,"lat":10.85498142,"lon":108.04677581,"mcc":452,"mnc":1,"pci":379,"tac_id":62400,"unknown_12":1856},{"acc":1414,"azimuth_deg":244.0,"cell_id":141702412,"crawled_at":null,"earfcn":1501,"lat":10.95453357,"lon":108.22075653,"mcc":452,"mnc":1,"pci":280,"tac_id":62400,"unknown_12":4797},{"acc":1414,"azimuth_deg":null,"cell_id":141776653,"crawled_at":null,"earfcn":1501,"lat":10.92264652,"lon":108.01468658,"mcc":452,"mnc":1,"pci":172,"tac_id":62450,"unknown_12":881},{"acc":7098,"azimuth_deg":352.0,"cell_id":140809739,"crawled_at":null,"earfcn":1501,"lat":10.86507797,"lon":108.03637695,"mcc":452,"mnc":1,"pci":53,"tac_id":62400,"unknown_12":18261},{"acc":5173,"azimuth_deg":null,"cell_id":140823565,"crawled_at":null,"earfcn":1501,"lat":11.019231790000001,"lon":108.06540679,"mcc":452,"mnc":1,"pci":422,"tac_id":62440,"unknown_12":16003},{"acc":1414,"azimuth_deg":172.0,"cell_id":141762316,"crawled_at":null,"earfcn":1501,"lat":11.024694440000001,"lon":108.16402435,"mcc":452,"mnc":1,"pci":34,"tac_id":62440,"unknown_12":1360},{"acc":16392,"azimuth_deg":null,"cell_id":140829225,"crawled_at":null,"earfcn":1874,"lat":10.8491497,"lon":108.04863739,"mcc":452,"mnc":1,"pci":401,"tac_id":62400,"unknown_12":79882},{"acc":1414,"azimuth_deg":172.0,"cell_id":140809770,"crawled_at":null,"earfcn":1874,"lat":10.85302066,"lon":108.04388427,"mcc":452,"mnc":1,"pci":51,"tac_id":62400,"unknown_12":3868},{"acc":1414,"azimuth_deg":172.0,"cell_id":140809740,"crawled_at":null,"earfcn":1501,"lat":10.85376167,"lon":108.0411911,"mcc":452,"mnc":1,"pci":51,"tac_id":62400,"unknown_12":3348},{"acc":1414,"azimuth_deg":258.0,"cell_id":141762317,"crawled_at":null,"earfcn":1501,"lat":11.02964687,"lon":108.16108703,"mcc":452,"mnc":1,"pci":35,"tac_id":62440,"unknown_12":5319},{"acc":1414,"azimuth_deg":null,"cell_id":140802828,"crawled_at":null,"earfcn":1501,"lat":10.84907245,"lon":108.04459381000001,"mcc":452,"mnc":1,"pci":112,"tac_id":62400,"unknown_12":2192},{"acc":2219,"azimuth_deg":null,"cell_id":140829965,"crawled_at":null,"earfcn":1501,"lat":11.03392887,"lon":108.08725738,"mcc":452,"mnc":1,"pci":446,"tac_id":62440,"unknown_12":3804},{"acc":1414,"azimuth_deg":276.0,"cell_id":141144107,"crawled_at":null,"earfcn":1874,"lat":10.95569515,"lon":108.22740173,"mcc":452,"mnc":1,"pci":121,"tac_id":62400,"unknown_12":4374},{"acc":1414,"azimuth_deg":132.0,"cell_id":141765900,"crawled_at":null,"earfcn":1501,"lat":11.03849697,"lon":108.10329437,"mcc":452,"mnc":1,"pci":274,"tac_id":62440,"unknown_12":2390},{"acc":1414,"azimuth_deg":80.0,"cell_id":141702411,"crawled_at":null,"earfcn":1501,"lat":10.95654773,"lon":108.22888183,"mcc":452,"mnc":1,"pci":279,"tac_id":62400,"unknown_12":2965},{"acc":9458,"azimuth_deg":50.0,"cell_id":141699595,"crawled_at":null,"earfcn":1501,"lat":10.84310913,"lon":108.04722595,"mcc":452,"mnc":1,"pci":233,"tac_id":62400,"unknown_12":25513},{"acc":22370,"azimuth_deg":70.0,"cell_id":140825355,"crawled_at":null,"earfcn":1501,"lat":10.965583800000001,"lon":108.01176452,"mcc":452,"mnc":1,"pci":189,"tac_id":62450,"unknown_12":69477},{"acc":1414,"azimuth_deg":276.0,"cell_id":141144077,"crawled_at":null,"earfcn":1501,"lat":10.95656013,"lon":108.22982788,"mcc":452,"mnc":1,"pci":121,"tac_id":62400,"unknown_12":4577},{"acc":1414,"azimuth_deg":80.0,"cell_id":141702441,"crawled_at":null,"earfcn":1874,"lat":10.95711803,"lon":108.23106384,"mcc":452,"mnc":1,"pci":279,"tac_id":62400,"unknown_12":5637},{"acc":3085,"azimuth_deg":233.0,"cell_id":141767693,"crawled_at":null,"earfcn":1501,"lat":11.01973915,"lon":108.04857635,"mcc":452,"mnc":1,"pci":335,"tac_id":62440,"unknown_12":10108},{"acc":16039,"azimuth_deg":null,"cell_id":142030092,"crawled_at":null,"earfcn":1501,"lat":10.93955993,"lon":108.2344284,"mcc":452,"mnc":1,"pci":238,"tac_id":62400,"unknown_12":84736},{"acc":22239,"azimuth_deg":null,"cell_id":228404491,"crawled_at":null,"earfcn":1501,"lat":11.02310943,"lon":108.05197906000001,"mcc":452,"mnc":1,"pci":207,"tac_id":62440,"unknown_12":62024},{"acc":1414,"azimuth_deg":12.0,"cell_id":141762315,"crawled_at":null,"earfcn":1501,"lat":11.03596591,"lon":108.164505,"mcc":452,"mnc":1,"pci":33,"tac_id":62440,"unknown_12":2215},{"acc":6052,"azimuth_deg":126.0,"cell_id":141769484,"crawled_at":null,"earfcn":1501,"lat":11.04368591,"lon":108.13851928,"mcc":452,"mnc":1,"pci":216,"tac_id":62440,"unknown_12":17436},{"acc":23569,"azimuth_deg":53.0,"cell_id":141767691,"crawled_at":null,"earfcn":1501,"lat":11.03521633,"lon":108.06961822,"mcc":452,"mnc":1,"pci":333,"tac_id":62440,"unknown_12":59574},{"acc":2787,"azimuth_deg":null,"cell_id":141775116,"crawled_at":null,"earfcn":1501,"lat":10.96550559,"lon":108.0067749,"mcc":452,"mnc":1,"pci":373,"tac_id":62450,"unknown_12":10062},{"acc":4524,"azimuth_deg":291.0,"cell_id":140823053,"crawled_at":null,"earfcn":1501,"lat":11.03510951,"lon":108.0668106,"mcc":452,"mnc":1,"pci":260,"tac_id":62440,"unknown_12":13251},{"acc":3998,"azimuth_deg":60.0,"cell_id":142147595,"crawled_at":null,"earfcn":1501,"lat":11.030447,"lon":108.05622100000001,"mcc":452,"mnc":1,"pci":120,"tac_id":62410,"unknown_12":13753},{"acc":11590,"azimuth_deg":null,"cell_id":140800299,"crawled_at":null,"earfcn":1874,"lat":10.94598484,"lon":108.23950958,"mcc":452,"mnc":1,"pci":52,"tac_id":62400,"unknown_12":38746},{"acc":1414,"azimuth_deg":6.0,"cell_id":140823051,"crawled_at":null,"earfcn":1501,"lat":11.04397678,"lon":108.08145904,"mcc":452,"mnc":1,"pci":258,"tac_id":62440,"unknown_12":4250},{"acc":1414,"azimuth_deg":259.0,"cell_id":141765901,"crawled_at":null,"earfcn":1501,"lat":11.04394721,"lon":108.08007049,"mcc":452,"mnc":1,"pci":275,"tac_id":62440,"unknown_12":2889},{"acc":1414,"azimuth_deg":96.0,"cell_id":141144075,"crawled_at":null,"earfcn":1501,"lat":10.95508384,"lon":108.23951721,"mcc":452,"mnc":1,"pci":120,"tac_id":62400,"unknown_12":1775},{"acc":1414,"azimuth_deg":96.0,"cell_id":141144105,"crawled_at":null,"earfcn":1874,"lat":10.9549427,"lon":108.23965454,"mcc":452,"mnc":1,"pci":120,"tac_id":62400,"unknown_12":1821},{"acc":1414,"azimuth_deg":306.0,"cell_id":141769483,"crawled_at":null,"earfcn":1501,"lat":11.05164813,"lon":108.12742614,"mcc":452,"mnc":1,"pci":218,"tac_id":62440,"unknown_12":4318},{"acc":1414,"azimuth_deg":null,"cell_id":141770764,"crawled_at":null,"earfcn":1501,"lat":11.053442,"lon":108.10249328,"mcc":452,"mnc":1,"pci":160,"tac_id":62440,"unknown_12":3811},{"acc":1414,"azimuth_deg":275.0,"cell_id":141699597,"crawled_at":null,"earfcn":null,"lat":10.83676433,"lon":108.03382873,"mcc":452,"mnc":1,"pci":null,"tac_id":62400,"unknown_12":1274},{"acc":6710,"azimuth_deg":null,"cell_id":141003817,"crawled_at":null,"earfcn":1874,"lat":10.84340667,"lon":108.02655029,"mcc":452,"mnc":1,"pci":246,"tac_id":62400,"unknown_12":20366},{"acc":4686,"azimuth_deg":240.0,"cell_id":142147596,"crawled_at":null,"earfcn":1501,"lat":11.00920009,"lon":108.01906585,"mcc":452,"mnc":1,"pci":121,"tac_id":62410,"unknown_12":13582},{"acc":9518,"azimuth_deg":null,"cell_id":140800269,"crawled_at":null,"earfcn":1501,"lat":10.949490540000001,"lon":108.24673461,"mcc":452,"mnc":1,"pci":52,"tac_id":62400,"unknown_12":30602},{"acc":1414,"azimuth_deg":null,"cell_id":141697292,"crawled_at":null,"earfcn":1501,"lat":10.95364284,"lon":108.24656677,"mcc":452,"mnc":1,"pci":87,"tac_id":62400,"unknown_12":4030},{"acc":23777,"azimuth_deg":23.0,"cell_id":141765929,"crawled_at":null,"earfcn":1874,"lat":11.0572071,"lon":108.09832763,"mcc":452,"mnc":1,"pci":273,"tac_id":62440,"unknown_12":62332},{"acc":2032,"azimuth_deg":null,"cell_id":141003787,"crawled_at":null,"earfcn":1501,"lat":10.83942985,"lon":108.02500152,"mcc":452,"mnc":1,"pci":246,"tac_id":62400,"unknown_12":7785},{"acc":1611,"azimuth_deg":203.0,"cell_id":141699596,"crawled_at":null,"earfcn":1501,"lat":10.829128260000001,"lon":108.03578948,"mcc":452,"mnc":1,"pci":232,"tac_id":62400,"unknown_12":6255},{"acc":24257,"azimuth_deg":23.0,"cell_id":141765899,"crawled_at":null,"earfcn":1501,"lat":11.05788516,"lon":108.09910583,"mcc":452,"mnc":1,"pci":273,"tac_id":62440,"unknown_12":62221},{"acc":8036,"azimuth_deg":null,"cell_id":141705483,"crawled_at":null,"earfcn":1501,"lat":10.8254137,"lon":108.03995513,"mcc":452,"mnc":1,"pci":438,"tac_id":62400,"unknown_12":27740},{"acc":1414,"azimuth_deg":null,"cell_id":252987760,"crawled_at":null,"earfcn":1501,"lat":11.05975532,"lon":108.12882232,"mcc":452,"mnc":1,"pci":67,"tac_id":62440,"unknown_12":1682},{"acc":1588,"azimuth_deg":null,"cell_id":141702187,"crawled_at":null,"earfcn":1874,"lat":10.95222568,"lon":108.25083923,"mcc":452,"mnc":1,"pci":31,"tac_id":62400,"unknown_12":6188},{"acc":6352,"azimuth_deg":26.0,"cell_id":140826891,"crawled_at":null,"earfcn":1501,"lat":10.99568748,"lon":108.00343322,"mcc":452,"mnc":1,"pci":42,"tac_id":62450,"unknown_12":20659},{"acc":3996,"azimuth_deg":null,"cell_id":140824588,"crawled_at":null,"earfcn":1501,"lat":10.96399497,"lon":107.98996734,"mcc":452,"mnc":1,"pci":250,"tac_id":62450,"unknown_12":14146},{"acc":1414,"azimuth_deg":null,"cell_id":141702157,"crawled_at":null,"earfcn":1501,"lat":10.95242786,"lon":108.25206756,"mcc":452,"mnc":1,"pci":31,"tac_id":62400,"unknown_12":4876},{"acc":1414,"azimuth_deg":206.0,"cell_id":140826892,"crawled_at":null,"earfcn":1501,"lat":10.96925735,"lon":107.99021148,"mcc":452,"mnc":1,"pci":43,"tac_id":62450,"unknown_12":2604},{"acc":3471,"azimuth_deg":250.0,"cell_id":140825357,"crawled_at":null,"earfcn":1501,"lat":10.95660209,"lon":107.98645782,"mcc":452,"mnc":1,"pci":191,"tac_id":62450,"unknown_12":10993},{"acc":1414,"azimuth_deg":null,"cell_id":142148108,"crawled_at":null,"earfcn":1501,"lat":11.00168704,"lon":108.00494384,"mcc":452,"mnc":1,"pci":285,"tac_id":62450,"unknown_12":2381},{"acc":1414,"azimuth_deg":132.0,"cell_id":140806668,"crawled_at":null,"earfcn":1501,"lat":11.03071594,"lon":108.20831298,"mcc":452,"mnc":1,"pci":22,"tac_id":62440,"unknown_12":3513},{"acc":1414,"azimuth_deg":312.0,"cell_id":140806669,"crawled_at":null,"earfcn":1501,"lat":11.03556442,"lon":108.2028656,"mcc":452,"mnc":1,"pci":23,"tac_id":62440,"unknown_12":2537},{"acc":1414,"azimuth_deg":null,"cell_id":228405517,"crawled_at":null,"earfcn":1501,"lat":10.92447566,"lon":107.98254394,"mcc":452,"mnc":1,"pci":161,"tac_id":62450,"unknown_12":3203},{"acc":24148,"azimuth_deg":null,"cell_id":141097739,"crawled_at":null,"earfcn":1501,"lat":10.95588207,"lon":107.98505401,"mcc":452,"mnc":1,"pci":234,"tac_id":62450,"unknown_12":62085}],"generated":"2026-11-05 22:01 UTC","target":{"acc":1576,"azimuth_deg":111.0,"cell_id":140827660,"crawled_at":"2026-11-05T22:00:29Z","earfcn":1501,"lat":10.9294157,"lon":108.11930084000001,"mcc":452,"mnc":1,"pci":262,"tac_id":62400,"unknown_12":6151}};
+
+const RAMP = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
+              "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"];
+const GRID = 240;
+const SIGNAL_DB = 30;
+
+const isDark = () => {
+  const theme = document.documentElement.dataset.theme;
+  if (theme) return theme === "dark";
+  return matchMedia("(prefers-color-scheme: dark)").matches;
+};
+const css = (name) => getComputedStyle(document.querySelector(".viz-root")).getPropertyValue(name).trim();
+const $ = (id) => document.getElementById(id);
+
+// local metric coordinates around the target cell
+const t = DATA.target;
+const M_LAT = 111320;
+const M_LON = 111320 * Math.cos(t.lat * Math.PI / 180);
+const toXY = (lat, lon) => [(lon - t.lon) * M_LON, (lat - t.lat) * M_LAT];
+const toLatLon = (x, y) => [t.lat + y / M_LAT, t.lon + x / M_LON];
+
+const cells = [t, ...DATA.cells];
+const cx = new Float64Array(cells.length);
+const cy = new Float64Array(cells.length);
+const acc = new Float64Array(cells.length);
+const reach = new Float64Array(cells.length);
+// antenna direction in radians clockwise from north, estimated by wtfps; NaN if unknown
+const azimuth = new Float64Array(cells.length);
+cells.forEach((c, i) => {
+  [cx[i], cy[i]] = toXY(c.lat, c.lon);
+  acc[i] = c.acc != null && c.acc > 0 ? c.acc : 1414;
+  reach[i] = c.unknown_12 != null && c.unknown_12 > 0 ? c.unknown_12 : NaN;
+  azimuth[i] = c.azimuth_deg != null ? c.azimuth_deg * Math.PI / 180 : NaN;
+  c.dist = Math.hypot(cx[i], cy[i]);
+});
+
+// LTE downlink EARFCN ranges (3GPP TS 36.101) of common bands
+const BANDS = [[0, 599, 1, 2100], [600, 1199, 2, 1900], [1200, 1949, 3, 1800], [1950, 2399, 4, 1700],
+  [2400, 2649, 5, 850], [2750, 3449, 7, 2600], [3450, 3799, 8, 900], [5010, 5179, 12, 700],
+  [5180, 5279, 13, 700], [6150, 6449, 20, 800], [9210, 9659, 28, 700], [37750, 38249, 38, 2600],
+  [38650, 39649, 40, 2300], [39650, 41589, 41, 2500], [41590, 43589, 42, 3500]];
+function band(earfcn) {
+  const b = BANDS.find(([lo, hi]) => earfcn >= lo && earfcn <= hi);
+  return b ? `band ${b[2]}, ${b[3]} MHz` : "";
+}
+
+const sameFreq = cells.map((c) => t.earfcn != null && c.earfcn === t.earfcn);
+const freqKnown = t.earfcn != null;
+if (!freqKnown) $("same-freq").checked = false;
+$("same-freq").disabled = !freqKnown;
+if (t.azimuth_deg == null) {
+  $("directional-label").textContent = "Antenna directions (rough estimate; none for this cell)";
+}
+if (!(t.unknown_12 > 0)) {
+  $("use-reach").disabled = true;
+  $("use-reach-label").textContent = "Field 12 not crawled yet for this cell";
+}
+$("same-freq-label").textContent = freqKnown
+  ? `Only cells on this cell's frequency (EARFCN ${t.earfcn})`
+  : "Frequency of this cell unknown: comparing with all cells";
+
+// indices of the cells this cell competes with (always includes the cell itself at 0)
+let active = [];
+function updateActive() {
+  const only = $("same-freq").checked;
+  active = cells.map((_, i) => i).filter((i) => i === 0 || !only || sameFreq[i]);
+}
+
+// typical spacing: median distance from each competing cell to its nearest neighbour
+function typicalSpacing() {
+  const nn = active.slice(0, 300).map((i) => {
+    let best = Infinity;
+    for (const j of active) {
+      if (j === i) continue;
+      const d = Math.hypot(cx[i] - cx[j], cy[i] - cy[j]);
+      if (d > 30 && d < best) best = d;
+    }
+    return best;
+  }).filter(Number.isFinite).sort((a, b) => a - b);
+  return nn.length ? nn[Math.floor(nn.length / 2)] : 1000;
+}
+function resetRange() {
+  updateActive();
+  const auto = Math.min(15000, Math.max(1500, 4 * typicalSpacing()));
+  $("range").value = (auto / 1000).toFixed(1);
+}
+resetRange();
+
+function params() {
+  const n = +$("n").value;
+  const sigma = +$("sigma").value;
+  const k = +$("k").value;
+  const range = +$("range").value * 1000;
+  // experimental: fade out at this cell's own reach (Apple's field 12) instead of the
+  // shared max range; competition between cells stays distance-based
+  const useReach = $("use-reach").checked && !Number.isNaN(reach[0]);
+  return {
+    n, sigma, k, range, useReach,
+    directional: $("directional").checked,
+    fade: useReach ? reach[0] : range,
+    view: document.querySelector("input[name=view]:checked").value,
+    // received power in dB is -10 n log10(d); a logit over powers with this temperature
+    // matches Gaussian signal variation of sigma dB
+    K: 10 * n / Math.LN10,
+    T: sigma * Math.sqrt(6) / Math.PI,
+  };
+}
+
+// sector antenna pattern (3GPP TR 36.814), as in src/coverage.rs: -12 (θ / 65°)² dB, at most
+// 20 dB down, for an angle θ off the antenna's direction
+function sectorGain(offAxis) {
+  const theta = ((offAxis + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+  return -Math.min(12 * (theta * 180 / Math.PI / 65) ** 2, 20);
+}
+
+const P = new Float64Array(cells.length);
+// returns { share, signal, best, bestShare } at metric point (x, y)
+function evaluate(x, y, p) {
+  const k2 = p.k * p.k;
+  let max = -p.K * Math.log(p.fade); // fade-out level acts as a "no service" competitor
+  const p0 = max;
+  let best = 0;
+  for (const j of active) {
+    const dx = x - cx[j], dy = y - cy[j];
+    const d2 = dx * dx + dy * dy + k2 * acc[j] * acc[j] + 1;
+    P[j] = -0.5 * p.K * Math.log(d2);
+    if (p.directional && !Number.isNaN(azimuth[j])) P[j] += sectorGain(Math.atan2(dx, dy) - azimuth[j]);
+    if (P[j] > P[best]) best = j;
+    if (P[j] > max) max = P[j];
+  }
+  let sum = Math.exp((p0 - max) / p.T);
+  for (const j of active) sum += Math.exp((P[j] - max) / p.T);
+  return {
+    share: Math.exp((P[0] - max) / p.T) / sum,
+    signal: P[0] - p0,
+    best,
+    bestShare: Math.exp((P[best] - max) / p.T) / sum,
+  };
+}
+
+function rampColor(v) {
+  const ramp = isDark() ? [...RAMP].reverse() : RAMP;
+  const f = Math.min(1, Math.max(0, v)) * (ramp.length - 1);
+  const i = Math.min(ramp.length - 2, Math.floor(f));
+  const a = ramp[i], b = ramp[i + 1], u = f - i;
+  const ch = (h, o) => parseInt(h.slice(o, o + 2), 16);
+  return [1, 3, 5].map((o) => Math.round(ch(a, o) * (1 - u) + ch(b, o) * u));
+}
+
+const canvas = document.createElement("canvas");
+canvas.width = canvas.height = GRID;
+let extent = 0;
+let stats = {};
+let styleReady = false;
+let fitted = false;
+
+function render() {
+  const p = params();
+  extent = Math.min(15000, Math.max(p.fade * 1.2, 1500));
+  const ctx = canvas.getContext("2d");
+  const img = ctx.createImageData(GRID, GRID);
+  const step = 2 * extent / GRID;
+  const values = new Float64Array(GRID * GRID);
+  let area = 0, reach = 0;
+  for (let row = 0; row < GRID; row++) {
+    const y = extent - (row + 0.5) * step;
+    for (let col = 0; col < GRID; col++) {
+      const x = -extent + (col + 0.5) * step;
+      const r = evaluate(x, y, p);
+      if (r.share > 0.5) {
+        area += step * step;
+        reach = Math.max(reach, Math.hypot(x, y));
+      }
+      const v = p.view === "share" ? r.share : r.signal / SIGNAL_DB;
+      values[row * GRID + col] = p.view === "share" ? r.share : r.signal;
+      const o = (row * GRID + col) * 4;
+      if (v < 0.02) continue;
+      const [cr, cg, cb] = rampColor(v);
+      img.data[o] = cr; img.data[o + 1] = cg; img.data[o + 2] = cb;
+      img.data[o + 3] = Math.round(255 * Math.min(0.8, 0.2 + 0.65 * Math.min(1, v)));
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  stats = { area, reach };
+  updateText(p);
+  const [north, west] = toLatLon(-extent, extent);
+  const [south, east] = toLatLon(extent, -extent);
+  const coordinates = [[west, north], [east, north], [east, south], [west, south]];
+  if (!styleReady) return;
+  const source = map.getSource("heat");
+  if (source) source.updateImage({ url: canvas.toDataURL(), coordinates });
+  else addLayers(coordinates);
+  map.getSource("contours").setData(contourLines(values, step, p));
+  map.setLayoutProperty("antenna", "visibility", p.directional ? "visible" : "none");
+  const visibility = $("contours").checked ? "visible" : "none";
+  for (const id of ["contour-lines", "contour-labels"]) map.setLayoutProperty(id, "visibility", visibility);
+  if (!fitted) {
+    fitted = true;
+    map.fitBounds([[west, south], [east, north]], { padding: 20, animate: false });
+  }
+}
+
+const SHARE_LEVELS = [0.1, 0.25, 0.5, 0.75, 0.9];
+const SIGNAL_LEVELS = [5, 10, 15, 20, 25, 30];
+
+// contour lines of the grid values, traced by d3-contour (the Rust --contours output uses its
+// port). d3 centres value i on pixel [i, i + 1], matching where the grid was sampled.
+function contourLines(values, step, p) {
+  const isShare = p.view === "share";
+  const levels = isShare ? SHARE_LEVELS : SIGNAL_LEVELS;
+  const toLngLat = ([px, py]) => {
+    const [lat, lon] = toLatLon(-extent + px * step, extent - py * step);
+    return [lon, lat];
+  };
+  const features = d3.contours().size([GRID, GRID]).thresholds(levels)(values)
+    .filter((c) => c.coordinates.length)
+    .map((c) => ({
+      type: "Feature",
+      geometry: { type: "MultiPolygon", coordinates: c.coordinates.map((poly) => poly.map((ring) => ring.map(toLngLat))) },
+      properties: {
+        label: isShare ? `${Math.round(c.value * 100)}%` : `${c.value} dB`,
+        // the 50% line is where this cell becomes the most likely server
+        major: isShare && c.value === 0.5,
+      },
+    }));
+  return { type: "FeatureCollection", features };
+}
+
+// competing cells in the cell colour, cells on other frequencies muted and smaller
+function styleCells() {
+  if (!map.getLayer("cells")) return;
+  const only = $("same-freq").checked;
+  map.setPaintProperty("cells", "circle-color", only ? ["case", ["get", "same"], css("--cell"), css("--muted")] : css("--cell"));
+  map.setPaintProperty("cells", "circle-radius", only ? ["case", ["get", "same"], 4, 3] : 4);
+}
+
+function fmtKm(m) { return m >= 1000 ? (m / 1000).toFixed(1) + " km" : Math.round(m) + " m"; }
+
+function updateText(p) {
+  $("n-out").textContent = p.n.toFixed(1);
+  $("sigma-out").textContent = p.sigma.toFixed(1);
+  $("k-out").textContent = p.k.toFixed(2);
+  $("range-out").textContent = p.useReach ? `${(p.fade / 1000).toFixed(1)} (field 12)` : (p.range / 1000).toFixed(1);
+  $("range").disabled = p.useReach;
+  $("stat-area").textContent = (stats.area / 1e6).toFixed(2) + " km²";
+  $("stat-cells").textContent = String(active.length - 1);
+  $("stat-cells-label").textContent = $("same-freq").checked
+    ? "cells on the same frequency modelled nearby"
+    : "same-operator cells modelled nearby";
+  $("other-freq-key").style.display = $("same-freq").checked ? "" : "none";
+  $("contour-key").style.display = $("contours").checked ? "" : "none";
+  $("contour-key-label").textContent = p.view === "share" ? "contours at 10, 25, 50, 75, 90%" : "contours every 5 dB";
+  styleCells();
+  $("stat-reach").textContent = stats.area ? fmtKm(stats.reach) : "none";
+  const isShare = p.view === "share";
+  $("legend-title").textContent = isShare
+    ? "Chance this cell is the strongest of its operator"
+    : "Modelled signal above edge of coverage";
+  const ramp = isDark() ? [...RAMP].reverse() : RAMP;
+  $("legend-ramp").style.background = `linear-gradient(to right, transparent, ${ramp.join(", ")})`;
+  const ticks = isShare ? ["0%", "25%", "50%", "75%", "100%"] : ["0 dB", "", "15 dB", "", "30+ dB"];
+  $("legend-ticks").replaceChildren(...ticks.map((s) => {
+    const span = document.createElement("span");
+    span.textContent = s;
+    return span;
+  }));
+}
+
+// a short line from this cell in its estimated antenna direction
+function antennaLine() {
+  if (Number.isNaN(azimuth[0])) return { type: "FeatureCollection", features: [] };
+  const [lat, lon] = toLatLon(300 * Math.sin(azimuth[0]), 300 * Math.cos(azimuth[0]));
+  return { type: "Feature", geometry: { type: "LineString", coordinates: [[t.lon, t.lat], [lon, lat]] }, properties: {} };
+}
+
+function circle(lat, lon, radius) {
+  const ring = [];
+  for (let i = 0; i <= 64; i++) {
+    const a = 2 * Math.PI * i / 64;
+    ring.push([lon + radius * Math.cos(a) / M_LON, lat + radius * Math.sin(a) / M_LAT]);
+  }
+  return { type: "Feature", geometry: { type: "Polygon", coordinates: [ring] }, properties: {} };
+}
+
+const pointFeatures = {
+  type: "FeatureCollection",
+  features: DATA.cells.map((c, i) => ({
+    type: "Feature",
+    geometry: { type: "Point", coordinates: [c.lon, c.lat] },
+    properties: { i: i + 1, same: sameFreq[i + 1] },
+  })),
+};
+
+// keyless vector basemap; it carries its own attribution
+function baseStyle() {
+  return `https://tiles.openfreemap.org/styles/${isDark() ? "dark" : "positron"}`;
+}
+
+function addLayers(coordinates) {
+  map.addSource("heat", { type: "image", url: canvas.toDataURL(), coordinates });
+  // below the basemap's labels so place names stay readable
+  const labels = map.getStyle().layers.find((l) => l.type === "symbol");
+  map.addLayer({ id: "heat", type: "raster", source: "heat", paint: { "raster-resampling": "linear", "raster-fade-duration": 0 } }, labels?.id);
+  map.addSource("contours", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  map.addLayer({
+    id: "contour-lines", type: "line", source: "contours",
+    paint: { "line-color": css("--text-secondary"), "line-width": ["case", ["get", "major"], 1.5, 0.75], "line-opacity": 0.9 },
+  });
+  map.addLayer({
+    id: "contour-labels", type: "symbol", source: "contours",
+    layout: {
+      "symbol-placement": "line", "symbol-spacing": 250, "text-field": ["get", "label"],
+      "text-font": ["Noto Sans Regular"], "text-size": 11, "text-keep-upright": true,
+    },
+    paint: { "text-color": css("--text-primary"), "text-halo-color": css("--surface-1"), "text-halo-width": 1.5 },
+  });
+  map.addSource("antenna", { type: "geojson", data: antennaLine() });
+  map.addLayer({ id: "antenna", type: "line", source: "antenna", paint: { "line-color": css("--target"), "line-width": 2 } });
+  map.addSource("acc", { type: "geojson", data: circle(t.lat, t.lon, acc[0]) });
+  map.addLayer({ id: "acc", type: "line", source: "acc", paint: { "line-color": css("--target"), "line-width": 1.5 } });
+  map.addSource("hover-acc", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  map.addLayer({ id: "hover-acc", type: "line", source: "hover-acc", paint: { "line-color": css("--cell"), "line-width": 1 } });
+  map.addSource("cells", { type: "geojson", data: pointFeatures });
+  map.addLayer({
+    id: "cells", type: "circle", source: "cells",
+    paint: { "circle-radius": 4, "circle-color": css("--cell"), "circle-stroke-width": 2, "circle-stroke-color": css("--surface-1") },
+  });
+  map.addSource("target", { type: "geojson", data: { type: "Feature", geometry: { type: "Point", coordinates: [t.lon, t.lat] }, properties: { i: 0 } } });
+  map.addLayer({
+    id: "target", type: "circle", source: "target",
+    paint: { "circle-radius": 6, "circle-color": css("--target"), "circle-stroke-width": 2, "circle-stroke-color": css("--surface-1") },
+  });
+  styleCells();
+}
+
+const map = new maplibregl.Map({ container: "map", style: baseStyle(), center: [t.lon, t.lat], zoom: 12 });
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }));
+// fires again after a theme change replaces the style, which drops our layers
+map.on("style.load", () => { styleReady = true; render(); });
+
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => map.setStyle(baseStyle()));
+
+$("same-freq").addEventListener("input", resetRange);
+let pending = false;
+for (const el of document.querySelectorAll(".controls input")) {
+  el.addEventListener("input", () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; render(); });
+  });
+}
+
+const site = (id) => Math.floor(id / 256);
+const sector = (id) => id % 256;
+function cellLabel(c) { return `cell ${c.cell_id} · TAC ${c.tac_id} · site ${site(c.cell_id)} / sector ${sector(c.cell_id)}`; }
+function radioLabel(c) {
+  if (c.earfcn == null) return "frequency unknown";
+  const b = band(c.earfcn);
+  return `EARFCN ${c.earfcn}${b ? " (" + b + ")" : ""} · PCI ${c.pci ?? "unknown"}`;
+}
+
+const tooltip = $("tooltip");
+function showTooltip(point, lines) {
+  tooltip.replaceChildren();
+  lines.forEach(([text, strong], i) => {
+    if (i) tooltip.appendChild(document.createElement("br"));
+    const el = document.createElement(strong ? "strong" : "span");
+    el.textContent = text;
+    tooltip.appendChild(el);
+  });
+  tooltip.style.display = "block";
+  const w = tooltip.offsetWidth, h = tooltip.offsetHeight;
+  const card = $("map");
+  const left = point.x + 14 + w > card.clientWidth ? point.x - 14 - w : point.x + 14;
+  const top = point.y + 14 + h > card.clientHeight ? point.y - 14 - h : point.y + 14;
+  tooltip.style.left = left + "px";
+  tooltip.style.top = top + "px";
+}
+
+map.on("mousemove", (e) => {
+  if (!map.getLayer("cells")) return;
+  const pad = 12;
+  const hits = map.queryRenderedFeatures(
+    [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]],
+    { layers: ["target", "cells"] },
+  );
+  const hover = map.getSource("hover-acc");
+  if (hits.length) {
+    const c = cells[hits[0].properties.i];
+    hover.setData(hits[0].properties.i === 0 ? { type: "FeatureCollection", features: [] } : circle(c.lat, c.lon, acc[hits[0].properties.i]));
+    showTooltip(e.point, [
+      [`accuracy ${c.acc != null ? Math.round(c.acc) + " m" : "unknown"}`, true],
+      [cellLabel(c)],
+      [radioLabel(c)],
+      [`field 12 (reach?) ${c.unknown_12 != null ? fmtKm(c.unknown_12) : "unknown"}`],
+      [`antenna direction ${c.azimuth_deg != null ? Math.round(c.azimuth_deg) + "° (estimate)" : "unknown"}`],
+      [`crawled ${c.crawled_at ? c.crawled_at.slice(0, 16).replace("T", " ") + " UTC" : "before crawl times were recorded"}`],
+      [hits[0].properties.i === 0 ? "the cell this map is for" : `${fmtKm(c.dist)} from this cell`],
+    ]);
+    map.getCanvas().style.cursor = "pointer";
+    return;
+  }
+  hover.setData({ type: "FeatureCollection", features: [] });
+  map.getCanvas().style.cursor = "";
+  const p = params();
+  const [x, y] = toXY(e.lngLat.lat, e.lngLat.lng);
+  const r = evaluate(x, y, p);
+  const best = cells[r.best];
+  showTooltip(e.point, [
+    [`${Math.round(r.share * 100)}% likely served by this cell`, true],
+    [`signal ${r.signal >= 0 ? "+" : ""}${r.signal.toFixed(1)} dB vs edge of coverage`],
+    [`${fmtKm(Math.hypot(x, y))} from this cell`],
+    [r.best === 0 ? "this cell is the most likely server here" : `most likely server: cell ${best.cell_id} (${Math.round(r.bestShare * 100)}%)`],
+  ]);
+});
+map.getContainer().addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+
+$("title").textContent = `Estimated coverage of cell ${t.cell_id}`;
+$("subtitle").textContent = `MCC ${t.mcc} · MNC ${t.mnc} · TAC ${t.tac_id} · site ${site(t.cell_id)}, sector ${sector(t.cell_id)} · ` +
+  `${radioLabel(t)} · ` +
+  `${t.lat.toFixed(5)}, ${t.lon.toFixed(5)} · data from ${DATA.generated}`;
+$("stat-acc").textContent = t.acc != null ? Math.round(t.acc) + " m" : "unknown";
+
+const tbody = $("table-body");
+for (const c of cells.slice(0, 100)) {
+  const tr = document.createElement("tr");
+  const values = [c.cell_id, c.tac_id, site(c.cell_id), sector(c.cell_id),
+                  c.earfcn ?? "unknown", c.earfcn != null ? band(c.earfcn) : "", c.pci ?? "unknown", Math.round(c.dist),
+                  c.acc != null ? Math.round(c.acc) : "unknown", c.lat.toFixed(6), c.lon.toFixed(6),
+                  c.crawled_at ? c.crawled_at.slice(0, 16).replace("T", " ") : "unknown"];
+  for (const v of values) {
+    const td = document.createElement("td");
+    td.textContent = String(v);
+    tr.appendChild(td);
+  }
+  tbody.appendChild(tr);
+}
+</script>
+</body>
+</html>
