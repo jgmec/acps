@@ -157,6 +157,7 @@ th { color: var(--text-secondary); font-weight: 500; }
     <label>Accuracy weight <output id="k-out"></output><input id="k" type="range" min="0" max="1" step="0.05" value="0"></label>
     <label>Max range (km) <output id="range-out"></output><input id="range" type="range" min="0.5" max="20" step="0.1"></label>
     <label style="flex-direction:row;align-items:center"><input type="checkbox" id="same-freq" checked> <span id="same-freq-label"></span></label>
+    <label style="flex-direction:row;align-items:center"><input type="checkbox" id="use-reach"> <span id="use-reach-label">Fade out at this cell's reach from Apple's field 12 (experimental)</span></label>
   </div>
 
   <div class="card">
@@ -191,6 +192,8 @@ th { color: var(--text-secondary); font-weight: 500; }
     a spot. <em>Relative signal</em> is this cell's modelled level above the edge of coverage, ignoring other cells.
     Accuracy weight blurs each cell's position by its accuracy; at 0 positions are taken as exact. Max range is the
     distance at which signal is assumed to fade out; it starts from 4× the typical spacing between nearby cells.
+    The experimental field 12 option fades this cell out at its own reach instead: an undocumented number from
+    Apple's reply that grows with the spacing between cells like a coverage radius, though its meaning is a guess.
     Operators run several frequency layers over the same area and a phone doesn't choose between layers by
     distance, so by default this cell only competes with cells on its own frequency (EARFCN); cells whose frequency
     isn't known yet are left out until the crawler sees them again. Cells Apple doesn't know, or that the crawler
@@ -226,9 +229,11 @@ const cells = [t, ...DATA.cells];
 const cx = new Float64Array(cells.length);
 const cy = new Float64Array(cells.length);
 const acc = new Float64Array(cells.length);
+const reach = new Float64Array(cells.length);
 cells.forEach((c, i) => {
   [cx[i], cy[i]] = toXY(c.lat, c.lon);
   acc[i] = c.acc != null && c.acc > 0 ? c.acc : 1414;
+  reach[i] = c.unknown_12 != null && c.unknown_12 > 0 ? c.unknown_12 : NaN;
   c.dist = Math.hypot(cx[i], cy[i]);
 });
 
@@ -246,6 +251,10 @@ const sameFreq = cells.map((c) => t.earfcn != null && c.earfcn === t.earfcn);
 const freqKnown = t.earfcn != null;
 if (!freqKnown) $("same-freq").checked = false;
 $("same-freq").disabled = !freqKnown;
+if (!(t.unknown_12 > 0)) {
+  $("use-reach").disabled = true;
+  $("use-reach-label").textContent = "Field 12 not crawled yet for this cell";
+}
 $("same-freq-label").textContent = freqKnown
   ? `Only cells on this cell's frequency (EARFCN ${t.earfcn})`
   : "Frequency of this cell unknown: comparing with all cells";
@@ -281,9 +290,13 @@ function params() {
   const n = +$("n").value;
   const sigma = +$("sigma").value;
   const k = +$("k").value;
+  const range = +$("range").value * 1000;
+  // experimental: fade out at this cell's own reach (Apple's field 12) instead of the
+  // shared max range; competition between cells stays distance-based
+  const useReach = $("use-reach").checked && !Number.isNaN(reach[0]);
   return {
-    n, sigma, k,
-    range: +$("range").value * 1000,
+    n, sigma, k, range, useReach,
+    fade: useReach ? reach[0] : range,
     view: document.querySelector("input[name=view]:checked").value,
     // received power in dB is -10 n log10(d); a logit over powers with this temperature
     // matches Gaussian signal variation of sigma dB
@@ -296,7 +309,7 @@ const P = new Float64Array(cells.length);
 // returns { share, signal, best, bestShare } at metric point (x, y)
 function evaluate(x, y, p) {
   const k2 = p.k * p.k;
-  let max = -p.K * Math.log(p.range); // fade-out level acts as a "no service" competitor
+  let max = -p.K * Math.log(p.fade); // fade-out level acts as a "no service" competitor
   const p0 = max;
   let best = 0;
   for (const j of active) {
@@ -334,7 +347,7 @@ let fitted = false;
 
 function render() {
   const p = params();
-  extent = Math.max(p.range * 1.2, 1500);
+  extent = Math.min(15000, Math.max(p.fade * 1.2, 1500));
   const ctx = canvas.getContext("2d");
   const img = ctx.createImageData(GRID, GRID);
   const step = 2 * extent / GRID;
@@ -386,7 +399,8 @@ function updateText(p) {
   $("n-out").textContent = p.n.toFixed(1);
   $("sigma-out").textContent = p.sigma.toFixed(1);
   $("k-out").textContent = p.k.toFixed(2);
-  $("range-out").textContent = (p.range / 1000).toFixed(1);
+  $("range-out").textContent = p.useReach ? `${(p.fade / 1000).toFixed(1)} (field 12)` : (p.range / 1000).toFixed(1);
+  $("range").disabled = p.useReach;
   $("stat-area").textContent = (stats.area / 1e6).toFixed(2) + " km²";
   $("stat-cells").textContent = String(active.length - 1);
   $("stat-cells-label").textContent = $("same-freq").checked
@@ -513,6 +527,7 @@ map.on("mousemove", (e) => {
       [`accuracy ${c.acc != null ? Math.round(c.acc) + " m" : "unknown"}`, true],
       [cellLabel(c)],
       [radioLabel(c)],
+      [`field 12 (reach?) ${c.unknown_12 != null ? fmtKm(c.unknown_12) : "unknown"}`],
       [hits[0].properties.i === 0 ? "the cell this map is for" : `${fmtKm(c.dist)} from this cell`],
     ]);
     map.getCanvas().style.cursor = "pointer";

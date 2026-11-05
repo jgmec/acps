@@ -68,6 +68,22 @@ cellid 451645		horizontal_accuracy Some(1414)		location https://www.openstreetma
 ...
 ```
 
+Add `--raw` to see every field of Apple's reply, including ones wtfps doesn't decode: each field path (`22` is the list of cells, `22.5` a cell's location, `22.5.3` its accuracy) with how often it occurs, how many distinct values it has, and the most common values.
+
+```
+$ wtfps cell 452 1 36003 30883339 --raw
+reply: 5694 bytes; header 00 01 00 00 00 01 00 00 16 34 (declares 5684 bytes, 5684 follow)
+
+field             count  distinct  most common values (value: times)
+22                  120            (message)
+22.1                120         1  452: 120
+22.3                120       101  -1: 20, 104962572: 1, 104965643: 1, 104985867: 1
+22.5.3              120        14  1414: 88, 149000: 20, 10220: 1, 10721: 1
+22.5.11             120        10  939: 27, 1: 20, 941: 18, 940: 16
+22.5.12             120        99  0: 21, 999: 2, 1004: 1, 1017: 1
+...
+```
+
 The reply holds the queried cell, up to ~100 nearby cells from all operators, and up to 20 entries with cell ID `4294967295`. Those are rough location estimates for whole tracking areas (fixed accuracy of 149000), not cells. `horizontal_accuracy` is in metres; 1414 is the smallest value Apple reports for cells. Cells Apple doesn't know come back with accuracy `-1` and are printed as `not found`.
 
 ### `explore cell`
@@ -110,6 +126,8 @@ select count(*), count(*) filter (where found) from cell_probe;
 
 For each cell wtfps also stores the LTE channel (`earfcn`) and physical cell ID (`pci`) when Apple reports them; Apple reports them for neighbouring cells but not for the cell you query. Cells crawled before these columns existed pick them up when they appear in a later reply.
 
+Two undocumented location fields are stored too, so their meaning can be worked out from the data: `unknown_11` (about 940 for real cells, 1 for tracking-area estimates; possibly a version or age) and `unknown_12` (varies widely and tracks the accuracy; possibly a finer accuracy figure before Apple's 1414 m minimum).
+
 ### `heatmap`
 
 Writes a self-contained HTML map estimating where a crawled cell is likely to serve phones:
@@ -125,6 +143,31 @@ Open the file in a browser. It shows the cell, its accuracy circle, and the near
 - **Relative signal**: this cell's modelled signal above the edge of coverage, ignoring other cells.
 
 The coverage is a model, not a measurement: signal falls off with distance, and a phone uses the strongest cell on its frequency, allowing for random variation from buildings and terrain. By default the cell only competes with cells on its own EARFCN, because operators run several frequency layers over the same area. Sliders adjust the path-loss exponent, signal variation, accuracy weight and maximum range; the page explains each one. The cell must already be in the database (crawl it with `explore cell` first). The map loads MapLibre and the OpenFreeMap basemap from the internet; the cell data is embedded in the file.
+
+See [`examples/`](examples/) for two generated maps with screenshots.
+
+Add `--geojson` to write the same data as GeoJSON instead: the cell (`role: "cell"`), its accuracy circle (`role: "accuracy"`, a polygon with `radius_m`), and the nearby cells (`role: "nearby"`) with `distance_m`, `bearing_deg` from the cell (clockwise from north) and `same_frequency`. Every cell carries `mcc`, `mnc`, `tac_id`, `cell_id`, `site`, `sector`, `acc_m`, `earfcn` and `pci`.
+
+```
+$ wtfps heatmap 452 4 38211 209991683 --geojson --radius-km 3
+wrote cell-452-4-38211-209991683.geojson (103 nearby cells)
+```
+
+The GeoJSON also contains the modelled coverage, calculated by wtfps with the same model as the HTML map: H3 hexagons (`role: "coverage"`) wherever the cell has at least a 1% chance of serving, each with `likelihood` (0–1), `signal_db` (modelled signal above the edge of coverage) and the most likely serving cell there (`most_likely_cell_id`, `most_likely_tac_id`, `most_likely_likelihood`). The cell's own feature gets a `coverage` summary: `area_km2` and `reach_m` where its likelihood is above 50% (measured on hexagons two resolutions finer than the ones written), the number of competing cells, and the model settings used. The settings match the sliders on the HTML map:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--path-loss` | 3.5 | how fast signal falls with distance: about 2 in open country, 3–4 in towns |
+| `--sigma-db` | 8 | random signal variation from buildings and terrain |
+| `--acc-weight` | 0 | how much each cell's position is blurred by its accuracy |
+| `--range-km` | 4× typical spacing | distance at which signal fades out |
+| `--all-frequencies` | off | compete with cells on every frequency, not just the cell's own EARFCN |
+| `--use-unknown-12` | off | experimental: fade out at the cell's own reach from Apple's field 12 instead of the shared range; see [examples](examples/README.md#comparison-fading-out-at-the-cells-own-reach-field-12) |
+| `--hex-res` | 10 | H3 resolution of the hexagons (10: ~0.015 km², 11: ~0.002 km²) |
+
+### `migrate`
+
+`explore` applies pending database migrations when it starts. To update the schema without crawling, run `wtfps migrate`.
 
 #### Testing the cell crawler with Docker
 

@@ -32,6 +32,13 @@ impl AppleWPSClient {
     }
 
     async fn query(&self, x: AppleWLoc) -> Result<AppleWLoc> {
+        let body = self.query_raw(x).await?;
+        Ok(AppleWLoc::decode(&body[10..])?)
+    }
+
+    /// The raw reply: a 10-byte header (ending in the u16 big-endian length of the rest)
+    /// followed by the protobuf message.
+    async fn query_raw(&self, x: AppleWLoc) -> Result<Vec<u8>> {
         let mut payload = Vec::new();
 
         // header
@@ -78,7 +85,7 @@ impl AppleWPSClient {
         if body.len() < 10 {
             bail!("response too short: {} bytes", body.len());
         }
-        Ok(AppleWLoc::decode(&body[10..])?)
+        Ok(body.to_vec())
     }
 
     pub async fn query_wifi(&self, mac: MacAddress) -> Result<Vec<(MacAddress, Option<Location>)>> {
@@ -119,6 +126,12 @@ impl AppleWPSClient {
         }
         Ok(output)
     }
+
+    /// Raw reply for a cell request, for inspecting fields wtfps doesn't decode.
+    pub async fn query_cell_raw(&self, cell: CellTower) -> Result<Vec<u8>> {
+        self.query_raw(AppleWLoc { cell_tower_request: vec![cell], ..Default::default() })
+            .await
+    }
 }
 
 pub struct Location {
@@ -127,6 +140,9 @@ pub struct Location {
     pub acc: i64,
     pub alt: i64,
     pub alt_acc: i64,
+    /// undocumented location fields 11 and 12, kept for analysis
+    pub unknown_11: Option<i64>,
+    pub unknown_12: Option<i64>,
 }
 
 impl Location {
@@ -141,6 +157,8 @@ impl Location {
                     acc: value.horizontal_accuracy.unwrap_or_default(),
                     alt: value.altitude.unwrap_or_default(),
                     alt_acc: value.vertical_accuracy.unwrap_or_default(),
+                    unknown_11: value.unknown_11,
+                    unknown_12: value.unknown_12,
                 });
             }
         }

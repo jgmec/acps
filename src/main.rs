@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use futures::{stream, StreamExt, TryStreamExt};
 use h3o::{LatLng, Resolution};
@@ -18,7 +18,9 @@ use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, query, query_scalar, PgPool};
 
 
+mod coverage;
 mod fetch;
+mod raw;
 use crate::fetch::{AppleWPSClient, Location};
 use crate::protobuf::CellTower;
 
@@ -52,6 +54,9 @@ enum Command {
         mnc: String,
         tacid: String,
         cellid: String,
+        /// print every field of Apple's raw reply, including ones wtfps doesn't decode
+        #[arg(long)]
+        raw: bool,
     },
     Oui {
         oui: String,
@@ -65,10 +70,45 @@ enum Command {
         /// include same-operator cells within this distance
         #[arg(long, default_value_t = 15.0)]
         radius_km: f64,
-        /// output file [default: cell-<mcc>-<mnc>-<tac>-<cell>.html]
+        /// write GeoJSON (the cell, its accuracy circle, the nearby cells and the modelled
+        /// coverage as H3 hexagons) instead of HTML
+        #[arg(long)]
+        geojson: bool,
+        #[command(flatten)]
+        model: ModelArgs,
+        /// output file [default: cell-<mcc>-<mnc>-<tac>-<cell>.html or .geojson]
         #[arg(long)]
         out: Option<String>,
     },
+    /// Apply pending database migrations and exit
+    Migrate,
+}
+
+/// Coverage model settings for `heatmap --geojson`; the HTML map has sliders for these
+#[derive(clap::Args, Debug, Clone)]
+struct ModelArgs {
+    /// path-loss exponent: about 2 in open country, 3-4 in towns
+    #[arg(long, default_value_t = 3.5)]
+    path_loss: f64,
+    /// random signal variation from buildings and terrain, in dB
+    #[arg(long, default_value_t = 8.0)]
+    sigma_db: f64,
+    /// how much each cell's position is blurred by its accuracy (0 = exact)
+    #[arg(long, default_value_t = 0.0)]
+    acc_weight: f64,
+    /// distance at which signal fades out [default: 4x the typical spacing of competing cells]
+    #[arg(long)]
+    range_km: Option<f64>,
+    /// compete with cells on all frequencies, not just the cell's own EARFCN
+    #[arg(long)]
+    all_frequencies: bool,
+    /// experimental: fade out at the cell's own reach from Apple's undocumented field 12
+    /// instead of one shared max range (--range-km); falls back to the range without it
+    #[arg(long)]
+    use_unknown_12: bool,
+    /// H3 resolution of the coverage hexagons (10: ~0.015 km², 11: ~0.002 km²)
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u8).range(7..=12))]
+    hex_res: u8,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -96,7 +136,7 @@ async fn main() -> Result<()> {
         Command::Explore { source } => {
             let pool = PgPoolOptions::new()
                 .max_connections((CONCURRENT_PARTS * 2) as _)
-                .connect(&dotenvy::var("DATABASE_URL")?)
+                .connect(&database_url()?)
                 .await?;
             sqlx::migrate!().run(&pool).await?;
 
@@ -190,20 +230,23 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Cell { mcc, mnc, tacid, cellid } =>{
+        Command::Cell { mcc, mnc, tacid, cellid, raw } =>{
+            let request = CellTower{
+                mcc: (&mcc).parse().unwrap(),
+                mnc: (&mnc).parse().unwrap(),
+                cell_id: (&cellid).parse().unwrap(),
+                tac_id: (&tacid).parse().unwrap(),
+                location: None,
+                uarfcn: None,
+                pid: None,
+            };
+            if raw {
+                print!("{}", raw::summarize(&client.query_cell_raw(request).await?));
+                return Ok(());
+            }
             println!("cellid: {cellid}");
 
-            let cells = client
-                .query_cell(CellTower{
-                    mcc: (&mcc).parse().unwrap(),
-                    mnc: (&mnc).parse().unwrap(),
-                    cell_id: (&cellid).parse().unwrap(),
-                    tac_id: (&tacid).parse().unwrap(),
-                    location: None,
-                    uarfcn: None,
-                    pid: None,
-                })
-                .await?;
+            let cells = client.query_cell(request).await?;
             if let Some((_, Some(loc))) = cells.first() {
                 println!("{}", osm(loc));
                 dbg!(cells.len());
@@ -223,15 +266,27 @@ async fn main() -> Result<()> {
 
         }
 
-        Command::Heatmap { mcc, mnc, tac_id, cell_id, radius_km, out } => {
+        Command::Heatmap { mcc, mnc, tac_id, cell_id, radius_km, geojson, model, out } => {
             let pool = PgPoolOptions::new()
                 .max_connections(1)
-                .connect(&dotenvy::var("DATABASE_URL")?)
+                .connect(&database_url()?)
                 .await?;
-            let path = out.unwrap_or_else(|| format!("cell-{mcc}-{mnc}-{tac_id}-{cell_id}.html"));
-            let neighbours =
-                write_heatmap(&pool, (mcc, mnc, tac_id, cell_id), radius_km, &path).await?;
+            let extension = if geojson { "geojson" } else { "html" };
+            let path =
+                out.unwrap_or_else(|| format!("cell-{mcc}-{mnc}-{tac_id}-{cell_id}.{extension}"));
+            let key = (mcc, mnc, tac_id, cell_id);
+            let model = geojson.then_some(model);
+            let neighbours = write_heatmap(&pool, key, radius_km, &path, model).await?;
             println!("wrote {path} ({neighbours} nearby cells)");
+        }
+
+        Command::Migrate => {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&database_url()?)
+                .await?;
+            sqlx::migrate!().run(&pool).await?;
+            println!("database schema is up to date");
         }
 
         Command::Oui { oui } => {
@@ -494,6 +549,7 @@ async fn commit_cells(
     let (mut mccs, mut mncs, mut tacs, mut cell_ids) = (vec![], vec![], vec![], vec![]);
     let (mut lats, mut lons, mut accs, mut cell_areas) = (vec![], vec![], vec![], vec![]);
     let (mut earfcns, mut pcis) = (vec![], vec![]);
+    let (mut unknown_11s, mut unknown_12s) = (vec![], vec![]);
     for (&key @ (mcc, mnc, tac_id, cell_id), (loc, earfcn, pci)) in &found {
         let area = cell_area(loc.lat, loc.lon)?;
         areas.insert((mcc, mnc, area));
@@ -510,6 +566,8 @@ async fn commit_cells(
         cell_areas.push(area);
         earfcns.push(*earfcn);
         pcis.push(*pci);
+        unknown_11s.push(loc.unknown_11);
+        unknown_12s.push(loc.unknown_12);
     }
     areas.extend(crawled.iter().copied());
 
@@ -523,24 +581,31 @@ async fn commit_cells(
     let mut tx = pool.begin().await?;
 
     // cells stored before areas were tracked get their area and accuracy on the next sighting;
-    // known cells keep their position but pick up EARFCN / PCI when a reply includes them
+    // known cells keep their position but pick up EARFCN / PCI and the undocumented fields
+    // when a reply includes them
     sqlx::query(
-        "insert into cell (mcc, mnc, tac_id, cell_id, geom, acc, crawl_area, earfcn, pci) \
+        "insert into cell (mcc, mnc, tac_id, cell_id, geom, acc, crawl_area, earfcn, pci, \
+                           unknown_11, unknown_12) \
          select mcc, mnc, tac_id, cell_id, ST_SetSRID(ST_MakePoint(lon, lat), 4326), acc, area, \
-                earfcn, pci \
+                earfcn, pci, unknown_11, unknown_12 \
          from unnest($1::integer[], $2::integer[], $3::integer[], $4::bigint[], \
                      $5::float8[], $6::float8[], $7::bigint[], $8::bigint[], \
-                     $9::integer[], $10::integer[]) \
-             as t(mcc, mnc, tac_id, cell_id, lat, lon, acc, area, earfcn, pci) \
+                     $9::integer[], $10::integer[], $11::bigint[], $12::bigint[]) \
+             as t(mcc, mnc, tac_id, cell_id, lat, lon, acc, area, earfcn, pci, \
+                  unknown_11, unknown_12) \
          on conflict (mcc, mnc, tac_id, cell_id) do update set \
              geom = case when cell.crawl_area is null then excluded.geom else cell.geom end, \
              acc = case when cell.crawl_area is null then excluded.acc else cell.acc end, \
              crawl_area = coalesce(cell.crawl_area, excluded.crawl_area), \
              earfcn = coalesce(excluded.earfcn, cell.earfcn), \
-             pci = coalesce(excluded.pci, cell.pci) \
+             pci = coalesce(excluded.pci, cell.pci), \
+             unknown_11 = coalesce(excluded.unknown_11, cell.unknown_11), \
+             unknown_12 = coalesce(excluded.unknown_12, cell.unknown_12) \
          where cell.crawl_area is null \
             or excluded.earfcn is distinct from cell.earfcn and excluded.earfcn is not null \
-            or excluded.pci is distinct from cell.pci and excluded.pci is not null",
+            or excluded.pci is distinct from cell.pci and excluded.pci is not null \
+            or excluded.unknown_11 is distinct from cell.unknown_11 and excluded.unknown_11 is not null \
+            or excluded.unknown_12 is distinct from cell.unknown_12 and excluded.unknown_12 is not null",
     )
     .bind(&mccs)
     .bind(&mncs)
@@ -552,6 +617,8 @@ async fn commit_cells(
     .bind(&cell_areas)
     .bind(&earfcns)
     .bind(&pcis)
+    .bind(&unknown_11s)
+    .bind(&unknown_12s)
     .execute(&mut *tx)
     .await?;
 
@@ -875,16 +942,39 @@ const HEATMAP_TEMPLATE: &str = include_str!("heatmap.html");
 /// the page models every cell for every pixel, so keep the nearest ones only
 const HEATMAP_MAX_CELLS: i64 = 800;
 
-/// Write a self-contained HTML coverage map for one cell, embedding it and the nearest
+#[derive(sqlx::FromRow)]
+struct NearbyCell {
+    tac_id: i32,
+    cell_id: i64,
+    lat: f64,
+    lon: f64,
+    acc: Option<i64>,
+    earfcn: Option<i32>,
+    pci: Option<i32>,
+    distance_m: f64,
+    /// direction from the chosen cell, degrees clockwise from north
+    bearing_deg: Option<f64>,
+    unknown_12: Option<i64>,
+    generated: String,
+}
+
+/// Write a self-contained HTML coverage map (or GeoJSON) for one cell, with the nearest
 /// cells of the same operator. Returns the number of nearby cells included.
-async fn write_heatmap(pool: &PgPool, key: CellKey, radius_km: f64, path: &str) -> Result<usize> {
+async fn write_heatmap(
+    pool: &PgPool,
+    key: CellKey,
+    radius_km: f64,
+    path: &str,
+    geojson: Option<ModelArgs>,
+) -> Result<usize> {
     let (mcc, mnc, tac_id, cell_id) = key;
-    type Row = (i32, i64, f64, f64, Option<i64>, Option<i32>, Option<i32>, String);
-    let rows: Vec<Row> = sqlx::query_as(
+    let rows: Vec<NearbyCell> = sqlx::query_as(
         "with t as (select geom from cell \
                     where mcc = $1 and mnc = $2 and tac_id = $3 and cell_id = $4) \
-         select c.tac_id, c.cell_id, ST_Y(c.geom::geometry), ST_X(c.geom::geometry), c.acc, \
-                c.earfcn, c.pci, to_char(now(), 'YYYY-MM-DD HH24:MI TZ') \
+         select c.tac_id, c.cell_id, ST_Y(c.geom::geometry) as lat, ST_X(c.geom::geometry) as lon, \
+                c.acc, c.earfcn, c.pci, c.unknown_12, ST_Distance(c.geom, t.geom) as distance_m, \
+                degrees(ST_Azimuth(t.geom, c.geom)) as bearing_deg, \
+                to_char(now(), 'YYYY-MM-DD HH24:MI TZ') as generated \
          from cell c, t \
          where c.mcc = $1 and c.mnc = $2 and ST_DWithin(c.geom, t.geom, $5) \
          order by ST_Distance(c.geom, t.geom), c.cell_id \
@@ -899,34 +989,227 @@ async fn write_heatmap(pool: &PgPool, key: CellKey, radius_km: f64, path: &str) 
     .fetch_all(pool)
     .await?;
 
-    let cell_json = |&(tac_id, cell_id, lat, lon, acc, earfcn, pci, _): &Row| {
+    let cell_json = |c: &NearbyCell| {
         json!({
-            "mcc": mcc, "mnc": mnc, "tac_id": tac_id, "cell_id": cell_id,
-            "lat": lat, "lon": lon, "acc": acc, "earfcn": earfcn, "pci": pci,
+            "mcc": mcc, "mnc": mnc, "tac_id": c.tac_id, "cell_id": c.cell_id,
+            "lat": c.lat, "lon": c.lon, "acc": c.acc, "earfcn": c.earfcn, "pci": c.pci,
+            "unknown_12": c.unknown_12,
         })
     };
-    let Some(target) = rows.iter().find(|r| (r.0, r.1) == (tac_id, cell_id)) else {
+    let is_target = |c: &&NearbyCell| (c.tac_id, c.cell_id) == (tac_id, cell_id);
+    let Some(target) = rows.iter().find(is_target) else {
         anyhow::bail!(
             "cell {mcc}/{mnc}/{tac_id}/{cell_id} is not in the database; \
              add it to cell_todo and run `explore cell` first"
         );
     };
-    let neighbours: Vec<_> = rows
-        .iter()
-        .filter(|r| (r.0, r.1) != (tac_id, cell_id))
-        .map(cell_json)
-        .collect();
+    let nearby: Vec<&NearbyCell> = rows.iter().filter(|c| !is_target(c)).collect();
+
+    if let Some(model) = geojson {
+        let accuracy: Option<String> = sqlx::query_scalar(
+            "select ST_AsGeoJSON(ST_Buffer(geom, acc, 'quad_segs=16'), 7) from cell \
+             where mcc = $1 and mnc = $2 and tac_id = $3 and cell_id = $4 and acc > 0",
+        )
+        .bind(mcc)
+        .bind(mnc)
+        .bind(tac_id)
+        .bind(cell_id)
+        .fetch_optional(pool)
+        .await?;
+        let coverage = model_coverage(target, &nearby, &model)?;
+        let geojson = cell_geojson(mcc, mnc, target, &nearby, accuracy, &coverage)?;
+        std::fs::write(path, geojson.to_string())?;
+        return Ok(nearby.len());
+    }
+
     let data = json!({
         "target": cell_json(target),
-        "cells": neighbours,
-        "generated": target.7,
+        "cells": nearby.iter().map(|c| cell_json(c)).collect::<Vec<_>>(),
+        "generated": target.generated,
     });
 
     // the JSON goes inside a <script> element
     let data = data.to_string().replace("</", "<\\/");
     let html = HEATMAP_TEMPLATE.replacen("/*DATA*/null", &data, 1);
     std::fs::write(path, html)?;
-    Ok(neighbours.len())
+    Ok(nearby.len())
+}
+
+/// GeoJSON FeatureCollection: the cell (role "cell"), its accuracy circle ("accuracy")
+/// and nearby cells of the same operator ("nearby") with distance and bearing from it.
+fn cell_geojson(
+    mcc: i32,
+    mnc: i32,
+    target: &NearbyCell,
+    nearby: &[&NearbyCell],
+    accuracy: Option<String>,
+    coverage: &ModelledCoverage,
+) -> Result<serde_json::Value> {
+    let properties = |c: &NearbyCell, role: &str| {
+        let mut p = json!({
+            "role": role,
+            "mcc": mcc, "mnc": mnc, "tac_id": c.tac_id, "cell_id": c.cell_id,
+            "site": c.cell_id >> 8, "sector": c.cell_id & 255,
+            "acc_m": c.acc, "earfcn": c.earfcn, "pci": c.pci, "unknown_12": c.unknown_12,
+        });
+        if role == "nearby" {
+            p["distance_m"] = json!(c.distance_m.round());
+            p["bearing_deg"] = json!(c.bearing_deg.map(|b| b.round()));
+            p["same_frequency"] = match (c.earfcn, target.earfcn) {
+                (Some(a), Some(b)) => json!(a == b),
+                _ => serde_json::Value::Null,
+            };
+        }
+        p
+    };
+    let point = |c: &NearbyCell, role: &str| {
+        json!({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [c.lon, c.lat]},
+            "properties": properties(c, role),
+        })
+    };
+
+    let mut cell = point(target, "cell");
+    let m = &coverage.model;
+    cell["properties"]["coverage"] = json!({
+        "area_km2": (coverage.result.area_km2 * 1000.0).round() / 1000.0,
+        "reach_m": coverage.result.reach_m.round(),
+        "competing_cells": coverage.competitors.len() - 1,
+        "same_frequency_only": coverage.same_frequency_only,
+        "range_m": coverage.result.range_m.round(),
+        "reach_from_unknown_12": m.use_unknown_12,
+        "target_reach_m": coverage.result.target_reach_m.map(f64::round),
+        "path_loss": m.path_loss,
+        "sigma_db": m.sigma_db,
+        "acc_weight": m.acc_weight,
+        "hex_res": m.hex_res,
+    });
+    // drawn in order: coverage underneath, then the accuracy circle, nearby cells, the cell
+    let mut features = vec![];
+    for hex in &coverage.result.hexes {
+        let mut ring: Vec<[f64; 2]> = hex.index.boundary().iter().map(|ll| [ll.lng(), ll.lat()]).collect();
+        ring.push(ring[0]);
+        let best = coverage.competitors[hex.best];
+        features.push(json!({
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [ring]},
+            "properties": {
+                "role": "coverage",
+                "h3": hex.index.to_string(),
+                "likelihood": (hex.likelihood * 1000.0).round() / 1000.0,
+                "signal_db": (hex.signal_db * 10.0).round() / 10.0,
+                "most_likely_cell_id": best.cell_id,
+                "most_likely_tac_id": best.tac_id,
+                "most_likely_likelihood": (hex.best_likelihood * 1000.0).round() / 1000.0,
+                "fill": ramp_color(hex.likelihood),
+                "fill-opacity": heat_opacity(hex.likelihood),
+                "stroke-width": 0,
+                "stroke-opacity": 0,
+            },
+        }));
+    }
+    if let Some(circle) = accuracy {
+        features.push(json!({
+            "type": "Feature",
+            "geometry": serde_json::from_str::<serde_json::Value>(&circle)?,
+            "properties": {
+                "role": "accuracy", "cell_id": target.cell_id, "radius_m": target.acc,
+                "stroke": STYLE_TARGET, "stroke-width": 1.5, "stroke-opacity": 1, "fill-opacity": 0,
+            },
+        }));
+    }
+    for c in nearby {
+        let mut feature = point(c, "nearby");
+        let other_frequency = coverage.same_frequency_only && c.earfcn != target.earfcn;
+        let style = feature["properties"].as_object_mut().unwrap();
+        style.insert("marker-color".into(), json!(if other_frequency { STYLE_MUTED } else { STYLE_CELL }));
+        style.insert("marker-size".into(), json!("small"));
+        features.push(feature);
+    }
+    let style = cell["properties"].as_object_mut().unwrap();
+    style.insert("marker-color".into(), json!(STYLE_TARGET));
+    style.insert("marker-size".into(), json!("medium"));
+    features.push(cell);
+    Ok(json!({"type": "FeatureCollection", "features": features}))
+}
+
+// Styling uses the simplestyle properties (fill, fill-opacity, marker-color, ...) that
+// geojson.io and GitHub's map preview apply automatically; colours match the HTML map.
+const STYLE_TARGET: &str = "#eb6834";
+const STYLE_CELL: &str = "#52514e";
+const STYLE_MUTED: &str = "#898781";
+const HEAT_RAMP: [[u8; 3]; 13] = [
+    [0xcd, 0xe2, 0xfb], [0xb7, 0xd3, 0xf6], [0x9e, 0xc5, 0xf4], [0x86, 0xb6, 0xef],
+    [0x6d, 0xa7, 0xec], [0x55, 0x98, 0xe7], [0x39, 0x87, 0xe5], [0x2a, 0x78, 0xd6],
+    [0x25, 0x6a, 0xbf], [0x1c, 0x5c, 0xab], [0x18, 0x4f, 0x95], [0x10, 0x42, 0x81],
+    [0x0d, 0x36, 0x6b],
+];
+
+/// light-to-dark blue for a value in 0..=1, interpolated between ramp steps
+fn ramp_color(value: f64) -> String {
+    let f = value.clamp(0.0, 1.0) * (HEAT_RAMP.len() - 1) as f64;
+    let i = (f.floor() as usize).min(HEAT_RAMP.len() - 2);
+    let u = f - i as f64;
+    let mix = |c: usize| (HEAT_RAMP[i][c] as f64 * (1.0 - u) + HEAT_RAMP[i + 1][c] as f64 * u).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", mix(0), mix(1), mix(2))
+}
+
+/// weak values fade into the basemap, as on the HTML map
+fn heat_opacity(value: f64) -> f64 {
+    if value < 0.02 {
+        return 0.0;
+    }
+    ((0.2 + 0.65 * value.min(1.0)).min(0.8) * 100.0).round() / 100.0
+}
+
+struct ModelledCoverage<'a> {
+    model: ModelArgs,
+    /// the target first, then the cells it competes with
+    competitors: Vec<&'a NearbyCell>,
+    same_frequency_only: bool,
+    result: coverage::Coverage,
+}
+
+/// Run the coverage model; unless asked otherwise, the cell only competes with cells known
+/// to be on its own EARFCN, because operators run several frequency layers over one area.
+fn model_coverage<'a>(
+    target: &'a NearbyCell,
+    nearby: &[&'a NearbyCell],
+    model: &ModelArgs,
+) -> Result<ModelledCoverage<'a>> {
+    let same_frequency_only = !model.all_frequencies && target.earfcn.is_some();
+    let mut competitors = vec![target];
+    competitors.extend(
+        nearby
+            .iter()
+            .filter(|c| !same_frequency_only || c.earfcn == target.earfcn),
+    );
+    let cells: Vec<coverage::ModelCell> = competitors
+        .iter()
+        .map(|c| coverage::ModelCell { lat: c.lat, lon: c.lon, acc: c.acc, reach: c.unknown_12 })
+        .collect();
+    let params = coverage::Params {
+        path_loss: model.path_loss,
+        sigma_db: model.sigma_db,
+        acc_weight: model.acc_weight,
+        range_m: model.range_km.map(|km| km * 1000.0),
+        use_reach: model.use_unknown_12,
+        resolution: Resolution::try_from(model.hex_res)?,
+    };
+    Ok(ModelledCoverage {
+        model: model.clone(),
+        same_frequency_only,
+        result: coverage::compute(&cells, &params)?,
+        competitors,
+    })
+}
+
+fn database_url() -> Result<String> {
+    dotenvy::var("DATABASE_URL").context(
+        "DATABASE_URL is not set; export it or put it in a .env file in the current directory, \
+         e.g. DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/wtfps",
+    )
 }
 
 fn osm(Location { lat, lon, .. }: &Location) -> String {

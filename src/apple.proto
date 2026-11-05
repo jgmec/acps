@@ -30,6 +30,12 @@ message Location {
   optional int64 latitude = 1;
   optional int64 longitude = 2;
   optional int64 horizontal_accuracy = 3;
+  // undocumented; always 0 in cell replies
+  optional int64 unknown_4 = 4;
   optional int64 altitude = 5;
   optional int64 vertical_accuracy = 6;
+  // undocumented; ~940 for real cells, 1 for tracking-area estimates (version or age?)
+  optional int64 unknown_11 = 11;
+  // undocumented; varies widely and tracks horizontal_accuracy (finer accuracy? size?)
+  optional int64 unknown_12 = 12;
 }
