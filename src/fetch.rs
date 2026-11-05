@@ -138,8 +138,9 @@ pub struct Location {
     pub lat: f64,
     pub lon: f64,
     pub acc: i64,
-    pub alt: i64,
-    pub alt_acc: i64,
+    /// altitude and vertical accuracy in metres, when the reply includes them (-1: unknown)
+    pub alt: Option<i64>,
+    pub alt_acc: Option<i64>,
     /// undocumented location fields 11 and 12, kept for analysis
     pub unknown_11: Option<i64>,
     pub unknown_12: Option<i64>,
@@ -155,8 +156,8 @@ impl Location {
                     lat,
                     lon,
                     acc: value.horizontal_accuracy.unwrap_or_default(),
-                    alt: value.altitude.unwrap_or_default(),
-                    alt_acc: value.vertical_accuracy.unwrap_or_default(),
+                    alt: value.altitude,
+                    alt_acc: value.vertical_accuracy,
                     unknown_11: value.unknown_11,
                     unknown_12: value.unknown_12,
                 });

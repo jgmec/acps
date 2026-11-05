@@ -21,7 +21,6 @@ mac6 = "1.2.0"
 mac_address = "1.1.8"
 #indicatif = "0.17.8"
 serde_json = "1.0.145"
-wireless = "0.2.2"
 contour = "0.13.1"
 
 [build-dependencies]

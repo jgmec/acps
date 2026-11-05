@@ -50,10 +50,10 @@ enum Command {
         mac: String,
     },
     Cell {
-        mcc: String,
-        mnc: String,
-        tacid: String,
-        cellid: String,
+        mcc: u32,
+        mnc: u32,
+        tacid: u32,
+        cellid: u32,
         /// print every field of Apple's raw reply, including ones wtfps doesn't decode
         #[arg(long)]
         raw: bool,
@@ -109,6 +109,10 @@ struct ModelArgs {
     /// H3 resolution of the coverage hexagons (10: ~0.015 km², 11: ~0.002 km²)
     #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u8).range(7..=12))]
     hex_res: u8,
+    /// experimental: give sectors a wedge-shaped antenna pattern, pointing the way their
+    /// position is offset from their site's centre (a rough estimate)
+    #[arg(long)]
+    directional: bool,
     /// write smooth likelihood contour bands instead of hexagons
     #[arg(long)]
     contours: bool,
@@ -154,86 +158,24 @@ async fn main() -> Result<()> {
                     explore_cells(&client, &pool, !no_probe).await?
                 }
 
-                _ => loop {
-                    let mut crawling = BTreeSet::new();
-                    let todo = match source {
-                        ExploreSource::Crawl => {
-                            let mut todo = Vec::new();
-                            let mut tx = pool.begin().await?;
-                            let areas = query_scalar!(
-                                "select area from crawl where last_crawled is null order by area limit 256"
-                            )
-                            .fetch_all(&mut *tx)
-                            .await?;
-                            if areas.len() == 0 {
-                                break;
-                            }
-
-                            for area in areas {
-                                let mac = query_scalar!(
-                                    "select mac from wifi where crawl_area = $1 order by random() limit 1",
-                                    area
-                                )
-                                .fetch_optional(&mut *tx)
-                                .await?;
-                                if let Some(mac) = mac {
-                                    crawling.insert(area);
-                                    todo.push(mac);
-                                } else {
-                                    query!("delete from crawl where area = $1", area)
-                                        .execute(&mut *tx)
-                                        .await?;
-                                }
-                            }
-                            tx.commit().await?;
-                            todo
-                        }
-                        ExploreSource::Todo { .. } => {
-                            let todo = query_scalar!("select mac from todo limit 256")
-                                .fetch_all(&pool)
-                                .await?;
-                            if todo.len() == 0 {
-                                break;
-                            }
-                            todo
-                        }
-                        ExploreSource::Cell { .. } => unreachable!(),
-                    };
-
-                    let mut requests = Vec::new();
-                    for mac in &todo {
-                        requests.push(client.query_wifi(*mac));
-                    }
-
-                    let ignore_extra = match source {
-                        ExploreSource::Todo { ignore_extra } => ignore_extra,
-                        _ => false,
-                    };
-
-                    info!("making {} requests...", requests.len());
-                    let mut requests = stream::iter(requests).buffer_unordered(256);
-                    let mut locs = BTreeMap::new();
-                    while let Some(response) = requests.try_next().await? {
-                        for (mac, loc) in response {
-                            if ignore_extra {
-                                if !todo.contains(&mac) {
-                                    continue;
-                                }
-                            }
-                            locs.insert(mac, loc);
-                        }
-                    }
-                    commit(pool.clone(), crawling, locs).await?;
-                },
+                ExploreSource::Crawl => explore_wifi(&client, &pool, true, false).await?,
+                ExploreSource::Todo { ignore_extra } => {
+                    explore_wifi(&client, &pool, false, ignore_extra).await?
+                }
             }
         }
         Command::Query { mac } => {
             let wifis = client
-                .query_wifi(Mac::from_str(&mac).unwrap().0.into())
+                .query_wifi(
+                    Mac::from_str(&mac)
+                        .map_err(|_| anyhow::anyhow!("not a MAC address: {mac}"))?
+                        .0
+                        .into(),
+                )
                 .await?;
             if let Some((_, Some(loc))) = wifis.first() {
                 println!("{}", osm(loc));
-                dbg!(wifis.len());
+                println!("{} networks in reply", wifis.len());
             } else {
                 println!("not found")
             }
@@ -241,10 +183,10 @@ async fn main() -> Result<()> {
 
         Command::Cell { mcc, mnc, tacid, cellid, raw } =>{
             let request = CellTower{
-                mcc: (&mcc).parse().unwrap(),
-                mnc: (&mnc).parse().unwrap(),
-                cell_id: (&cellid).parse().unwrap(),
-                tac_id: (&tacid).parse().unwrap(),
+                mcc,
+                mnc,
+                cell_id: cellid,
+                tac_id: tacid,
                 location: None,
                 uarfcn: None,
                 pid: None,
@@ -258,19 +200,29 @@ async fn main() -> Result<()> {
             let cells = client.query_cell(request).await?;
             if let Some((_, Some(loc))) = cells.first() {
                 println!("{}", osm(loc));
-                dbg!(cells.len());
+                println!("{} entries in reply", cells.len());
             } else {
                 println!("not found")
             }
+            println!(
+                "{:<12} {:>4} {:>7} {:>7}  {:<14} {:>4} {:>7}  location",
+                "cell_id", "mnc", "tac", "earfcn", "band", "pci", "acc_m"
+            );
             for (cell, loc) in cells {
-                print!("cellid {}", cell.cell_id);
-                if let Some(raw_loc) = cell.location {
-                    print!("\t\thorizontal_accuracy {:?}", raw_loc.horizontal_accuracy);
-                }
-                match loc {
-                    Some(l) => println!("\t\tlocation {}", osm(&l)),
-                    None => println!("\t\tnot found"),
-                }
+                let dash = || "-".to_string();
+                let earfcn = radio_value(cell.uarfcn);
+                let band = earfcn.and_then(lte_band).map_or_else(dash, |(b, mhz)| format!("{b} ({mhz} MHz)"));
+                let acc = cell.location.and_then(|l| l.horizontal_accuracy);
+                let id = if cell.cell_id == SENTINEL_CELL_ID { "area est.".into() } else { cell.cell_id.to_string() };
+                println!(
+                    "{id:<12} {:>4} {:>7} {:>7}  {band:<14} {:>4} {:>7}  {}",
+                    cell.mnc,
+                    cell.tac_id,
+                    earfcn.map_or_else(dash, |e| e.to_string()),
+                    radio_value(cell.pid).map_or_else(dash, |p| p.to_string()),
+                    acc.map_or_else(dash, |a| a.to_string()),
+                    loc.as_ref().map_or_else(|| "not found".to_string(), osm),
+                );
             }
 
         }
@@ -306,6 +258,72 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// WiFi exploration: query the `todo` queue, or with `crawl` one random known network per
+/// uncrawled area. With `ignore_extra`, only the queried networks are stored, not the
+/// nearby ones Apple returns with them.
+async fn explore_wifi(client: &AppleWPSClient, pool: &PgPool, crawl: bool, ignore_extra: bool) -> Result<()> {
+    loop {
+        let mut crawling = BTreeSet::new();
+        let todo = if crawl {
+            let mut todo = Vec::new();
+            let mut tx = pool.begin().await?;
+            let areas = query_scalar!(
+                "select area from crawl where last_crawled is null order by area limit 256"
+            )
+            .fetch_all(&mut *tx)
+            .await?;
+            if areas.is_empty() {
+                return Ok(());
+            }
+
+            for area in areas {
+                let mac = query_scalar!(
+                    "select mac from wifi where crawl_area = $1 order by random() limit 1",
+                    area
+                )
+                .fetch_optional(&mut *tx)
+                .await?;
+                if let Some(mac) = mac {
+                    crawling.insert(area);
+                    todo.push(mac);
+                } else {
+                    query!("delete from crawl where area = $1", area)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+            tx.commit().await?;
+            todo
+        } else {
+            let todo = query_scalar!("select mac from todo limit 256")
+                .fetch_all(pool)
+                .await?;
+            if todo.is_empty() {
+                return Ok(());
+            }
+            todo
+        };
+
+        let mut requests = Vec::new();
+        for mac in &todo {
+            requests.push(client.query_wifi(*mac));
+        }
+
+        info!("making {} requests...", requests.len());
+        let mut requests = stream::iter(requests).buffer_unordered(256);
+        let mut locs = BTreeMap::new();
+        while let Some(response) = requests.try_next().await? {
+            for (mac, loc) in response {
+                if ignore_extra && !todo.contains(&mac) {
+                    continue;
+                }
+                locs.insert(mac, loc);
+            }
+        }
+        commit(pool.clone(), crawling, locs).await?;
+    }
 }
 
 async fn commit(
@@ -399,6 +417,19 @@ fn cell_key(cell: &CellTower) -> CellKey {
         cell.tac_id as i32,
         cell.cell_id as i64,
     )
+}
+
+/// LTE band and its nominal frequency in MHz for a downlink EARFCN (3GPP TS 36.101);
+/// same table as the HTML map's
+fn lte_band(earfcn: i32) -> Option<(u32, u32)> {
+    const BANDS: [(i32, i32, u32, u32); 15] = [
+        (0, 599, 1, 2100), (600, 1199, 2, 1900), (1200, 1949, 3, 1800), (1950, 2399, 4, 1700),
+        (2400, 2649, 5, 850), (2750, 3449, 7, 2600), (3450, 3799, 8, 900), (5010, 5179, 12, 700),
+        (5180, 5279, 13, 700), (6150, 6449, 20, 800), (9210, 9659, 28, 700),
+        (37750, 38249, 38, 2600), (38650, 39649, 40, 2300), (39650, 41589, 41, 2500),
+        (41590, 43589, 42, 3500),
+    ];
+    BANDS.iter().find(|b| (b.0..=b.1).contains(&earfcn)).map(|b| (b.2, b.3))
 }
 
 /// EARFCN / PCI as reported by Apple; u32::MAX (-1) means unknown
@@ -559,6 +590,7 @@ async fn commit_cells(
     let (mut lats, mut lons, mut accs, mut cell_areas) = (vec![], vec![], vec![], vec![]);
     let (mut earfcns, mut pcis) = (vec![], vec![]);
     let (mut unknown_11s, mut unknown_12s) = (vec![], vec![]);
+    let (mut altitudes, mut vertical_accs) = (vec![], vec![]);
     for (&key @ (mcc, mnc, tac_id, cell_id), (loc, earfcn, pci)) in &found {
         let area = cell_area(loc.lat, loc.lon)?;
         areas.insert((mcc, mnc, area));
@@ -577,6 +609,8 @@ async fn commit_cells(
         pcis.push(*pci);
         unknown_11s.push(loc.unknown_11);
         unknown_12s.push(loc.unknown_12);
+        altitudes.push(loc.alt);
+        vertical_accs.push(loc.alt_acc);
     }
     areas.extend(crawled.iter().copied());
 
@@ -596,14 +630,15 @@ async fn commit_cells(
     // rewriting every row each batch would be wasteful
     sqlx::query(
         "insert into cell (mcc, mnc, tac_id, cell_id, geom, acc, crawl_area, earfcn, pci, \
-                           unknown_11, unknown_12) \
+                           unknown_11, unknown_12, altitude, vertical_acc) \
          select mcc, mnc, tac_id, cell_id, ST_SetSRID(ST_MakePoint(lon, lat), 4326), acc, area, \
-                earfcn, pci, unknown_11, unknown_12 \
+                earfcn, pci, unknown_11, unknown_12, altitude, vertical_acc \
          from unnest($1::integer[], $2::integer[], $3::integer[], $4::bigint[], \
                      $5::float8[], $6::float8[], $7::bigint[], $8::bigint[], \
-                     $9::integer[], $10::integer[], $11::bigint[], $12::bigint[]) \
+                     $9::integer[], $10::integer[], $11::bigint[], $12::bigint[], \
+                     $13::bigint[], $14::bigint[]) \
              as t(mcc, mnc, tac_id, cell_id, lat, lon, acc, area, earfcn, pci, \
-                  unknown_11, unknown_12) \
+                  unknown_11, unknown_12, altitude, vertical_acc) \
          on conflict (mcc, mnc, tac_id, cell_id) do update set \
              geom = case when cell.crawl_area is null then excluded.geom else cell.geom end, \
              acc = case when cell.crawl_area is null then excluded.acc else cell.acc end, \
@@ -612,13 +647,17 @@ async fn commit_cells(
              pci = coalesce(excluded.pci, cell.pci), \
              unknown_11 = coalesce(excluded.unknown_11, cell.unknown_11), \
              unknown_12 = coalesce(excluded.unknown_12, cell.unknown_12), \
+             altitude = coalesce(excluded.altitude, cell.altitude), \
+             vertical_acc = coalesce(excluded.vertical_acc, cell.vertical_acc), \
              crawled_at = current_timestamp \
          where cell.crawl_area is null \
             or cell.crawled_at is null or cell.crawled_at < current_timestamp - interval '1 hour' \
             or excluded.earfcn is distinct from cell.earfcn and excluded.earfcn is not null \
             or excluded.pci is distinct from cell.pci and excluded.pci is not null \
             or excluded.unknown_11 is distinct from cell.unknown_11 and excluded.unknown_11 is not null \
-            or excluded.unknown_12 is distinct from cell.unknown_12 and excluded.unknown_12 is not null",
+            or excluded.unknown_12 is distinct from cell.unknown_12 and excluded.unknown_12 is not null \
+            or excluded.altitude is distinct from cell.altitude and excluded.altitude is not null \
+            or excluded.vertical_acc is distinct from cell.vertical_acc and excluded.vertical_acc is not null",
     )
     .bind(&mccs)
     .bind(&mncs)
@@ -632,6 +671,8 @@ async fn commit_cells(
     .bind(&pcis)
     .bind(&unknown_11s)
     .bind(&unknown_12s)
+    .bind(&altitudes)
+    .bind(&vertical_accs)
     .execute(&mut *tx)
     .await?;
 
@@ -970,6 +1011,9 @@ struct NearbyCell {
     unknown_12: Option<i64>,
     /// ISO 8601 UTC; None for cells crawled before crawl times were recorded
     crawled_at: Option<String>,
+    /// estimated antenna direction, degrees clockwise from north
+    #[sqlx(skip)]
+    azimuth_deg: Option<f64>,
     generated: String,
 }
 
@@ -983,7 +1027,7 @@ async fn write_heatmap(
     geojson: Option<ModelArgs>,
 ) -> Result<usize> {
     let (mcc, mnc, tac_id, cell_id) = key;
-    let rows: Vec<NearbyCell> = sqlx::query_as(
+    let mut rows: Vec<NearbyCell> = sqlx::query_as(
         "with t as (select geom from cell \
                     where mcc = $1 and mnc = $2 and tac_id = $3 and cell_id = $4) \
          select c.tac_id, c.cell_id, ST_Y(c.geom::geometry) as lat, ST_X(c.geom::geometry) as lon, \
@@ -1005,11 +1049,18 @@ async fn write_heatmap(
     .fetch_all(pool)
     .await?;
 
+    // estimated from all of the operator's nearby cells, every frequency: a site's sectors
+    // use several bands
+    let sites: Vec<_> = rows.iter().map(|c| (c.cell_id >> 8, c.pci, c.lat, c.lon)).collect();
+    for (c, azimuth) in rows.iter_mut().zip(coverage::estimate_azimuths(&sites)) {
+        c.azimuth_deg = azimuth.map(|a| a.round());
+    }
+
     let cell_json = |c: &NearbyCell| {
         json!({
             "mcc": mcc, "mnc": mnc, "tac_id": c.tac_id, "cell_id": c.cell_id,
             "lat": c.lat, "lon": c.lon, "acc": c.acc, "earfcn": c.earfcn, "pci": c.pci,
-            "unknown_12": c.unknown_12, "crawled_at": c.crawled_at,
+            "unknown_12": c.unknown_12, "crawled_at": c.crawled_at, "azimuth_deg": c.azimuth_deg,
         })
     };
     let is_target = |c: &&NearbyCell| (c.tac_id, c.cell_id) == (tac_id, cell_id);
@@ -1067,7 +1118,7 @@ fn cell_geojson(
             "mcc": mcc, "mnc": mnc, "tac_id": c.tac_id, "cell_id": c.cell_id,
             "site": c.cell_id >> 8, "sector": c.cell_id & 255,
             "acc_m": c.acc, "earfcn": c.earfcn, "pci": c.pci, "unknown_12": c.unknown_12,
-            "crawled_at": c.crawled_at,
+            "crawled_at": c.crawled_at, "azimuth_deg": c.azimuth_deg,
         });
         if role == "nearby" {
             p["distance_m"] = json!(c.distance_m.round());
@@ -1096,6 +1147,7 @@ fn cell_geojson(
         "same_frequency_only": coverage.same_frequency_only,
         "range_m": coverage.result.range_m.round(),
         "reach_from_unknown_12": m.use_unknown_12,
+        "directional": m.directional,
         "target_reach_m": coverage.result.target_reach_m.map(f64::round),
         "path_loss": m.path_loss,
         "sigma_db": m.sigma_db,
@@ -1175,6 +1227,23 @@ fn cell_geojson(
         style.insert("marker-size".into(), json!("small"));
         features.push(feature);
     }
+    if let (true, Some(azimuth)) = (m.directional, target.azimuth_deg) {
+        // a short line from the cell in its estimated antenna direction
+        let length = 300.0;
+        let rad = azimuth.to_radians();
+        let end = [
+            target.lon + length * rad.sin() / (111_320.0 * target.lat.to_radians().cos()),
+            target.lat + length * rad.cos() / 111_320.0,
+        ];
+        features.push(json!({
+            "type": "Feature",
+            "geometry": {"type": "LineString", "coordinates": [[target.lon, target.lat], end]},
+            "properties": {
+                "role": "antenna", "cell_id": target.cell_id, "azimuth_deg": azimuth,
+                "stroke": STYLE_TARGET, "stroke-width": 2, "stroke-opacity": 1,
+            },
+        }));
+    }
     let style = cell["properties"].as_object_mut().unwrap();
     style.insert("marker-color".into(), json!(STYLE_TARGET));
     style.insert("marker-size".into(), json!("medium"));
@@ -1237,7 +1306,13 @@ fn model_coverage<'a>(
     );
     let cells: Vec<coverage::ModelCell> = competitors
         .iter()
-        .map(|c| coverage::ModelCell { lat: c.lat, lon: c.lon, acc: c.acc, reach: c.unknown_12 })
+        .map(|c| coverage::ModelCell {
+            lat: c.lat,
+            lon: c.lon,
+            acc: c.acc,
+            reach: c.unknown_12,
+            azimuth_deg: c.azimuth_deg,
+        })
         .collect();
     let params = coverage::Params {
         path_loss: model.path_loss,
@@ -1245,6 +1320,7 @@ fn model_coverage<'a>(
         acc_weight: model.acc_weight,
         range_m: model.range_km.map(|km| km * 1000.0),
         use_reach: model.use_unknown_12,
+        directional: model.directional,
         resolution: Resolution::try_from(model.hex_res)?,
     };
     let levels = &model.contour_levels;

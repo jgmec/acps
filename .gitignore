@@ -11,3 +11,13 @@ result*
 
 # samply
 profile.json
+
+# maps and exports written by `wtfps heatmap` (examples/ is tracked on purpose)
+/cell-*.html
+/cell-*.geojson
+/cells.geojson
+
+# editor and local tool settings
+.idea/
+.claude/settings.local.json
+.claude/*.tmp.*

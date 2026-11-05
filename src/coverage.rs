@@ -9,6 +9,9 @@
 //! undocumented location field 12 (which grows with cell spacing like a coverage radius)
 //! instead of one shared max range. Competition stays distance-based: treating field 12
 //! as each cell's strength let a few far-reaching outliers (40 km+) swamp whole towns.
+//!
+//! With `directional`, cells with an estimated antenna direction (see `estimate_azimuths`)
+//! get a sector antenna's gain, so they cover a wedge rather than a circle.
 
 use std::f64::consts::{LN_10, PI};
 
@@ -27,6 +30,8 @@ pub struct ModelCell {
     pub acc: Option<i64>,
     /// Apple's field 12; the target's is used as its reach in metres with `use_reach`
     pub reach: Option<i64>,
+    /// estimated antenna direction, degrees clockwise from north, used with `directional`
+    pub azimuth_deg: Option<f64>,
 }
 
 pub struct Params {
@@ -40,6 +45,8 @@ pub struct Params {
     pub range_m: Option<f64>,
     /// fade out at the target's own reach (field 12) instead of one shared max range
     pub use_reach: bool,
+    /// give cells with an estimated antenna direction a sector antenna's gain
+    pub directional: bool,
     pub resolution: Resolution,
 }
 
@@ -78,6 +85,8 @@ struct Model {
     m_lon: f64,
     xy: Vec<(f64, f64)>,
     blur2: Vec<f64>,
+    /// antenna direction in radians clockwise from north, if modelled for that cell
+    azimuth: Vec<Option<f64>>,
     k: f64,
     temperature: f64,
     p_edge: f64,
@@ -102,6 +111,10 @@ impl Model {
                     let acc = c.acc.filter(|&a| a > 0).map_or(DEFAULT_ACC_M, |a| a as f64);
                     (params.acc_weight * acc).powi(2)
                 })
+                .collect(),
+            azimuth: cells
+                .iter()
+                .map(|c| c.azimuth_deg.filter(|_| params.directional).map(f64::to_radians))
                 .collect(),
             k: 10.0 * params.path_loss / LN_10,
             temperature: params.sigma_db * 6f64.sqrt() / PI,
@@ -135,6 +148,9 @@ impl Model {
         for (j, &(cx, cy)) in self.xy.iter().enumerate() {
             let d2 = (x - cx).powi(2) + (y - cy).powi(2) + self.blur2[j] + 1.0;
             power[j] = -0.5 * self.k * d2.ln();
+            if let Some(azimuth) = self.azimuth[j] {
+                power[j] += sector_gain_db((x - cx).atan2(y - cy) - azimuth);
+            }
             if power[j] > power[best] {
                 best = j;
             }
@@ -234,6 +250,57 @@ pub fn likelihood_bands(
         .y_step(dlat)
         .isobands(&values, &thresholds)?;
     Ok(bands.into_iter().filter(|b| !b.geometry().0.is_empty()).collect())
+}
+
+/// Horizontal pattern of a sector antenna (3GPP TR 36.814): -12 (θ / beamwidth)² dB,
+/// at most `FRONT_TO_BACK_DB` down, for an angle θ off the antenna's direction.
+const BEAMWIDTH_DEG: f64 = 65.0;
+const FRONT_TO_BACK_DB: f64 = 20.0;
+
+fn sector_gain_db(off_axis: f64) -> f64 {
+    let theta = (off_axis + PI).rem_euclid(2.0 * PI) - PI;
+    -(12.0 * (theta.to_degrees() / BEAMWIDTH_DEG).powi(2)).min(FRONT_TO_BACK_DB)
+}
+
+/// Sector offsets under this are too small to say which way the antenna points.
+const MIN_SECTOR_OFFSET_M: f64 = 30.0;
+
+/// Estimated antenna directions (degrees clockwise from north) for cells given as
+/// (site, PCI, latitude, longitude). Apple places each sector where phones saw it, so a
+/// little way out in the direction its antenna points: the direction is the bearing from
+/// the site's centre to the sector. Cells of a site sharing a PCI are the same direction
+/// on different bands, so they are averaged first and the centre is the mean of those
+/// directions. A site needs at least two directions; this is rough, as sector positions
+/// mostly reflect where phones are.
+pub fn estimate_azimuths(cells: &[(i64, Option<i32>, f64, f64)]) -> Vec<Option<f64>> {
+    use std::collections::BTreeMap;
+    // site -> direction group (PCI, or the cell itself without one) -> cell indices
+    let mut sites: BTreeMap<i64, BTreeMap<(Option<i32>, usize), Vec<usize>>> = BTreeMap::new();
+    for (i, &(site, pci, ..)) in cells.iter().enumerate() {
+        let key = (pci, if pci.is_some() { 0 } else { i });
+        sites.entry(site).or_default().entry(key).or_default().push(i);
+    }
+    let mut azimuths = vec![None; cells.len()];
+    for groups in sites.values().filter(|g| g.len() >= 2) {
+        let mean = |idx: &[usize]| {
+            let n = idx.len() as f64;
+            (idx.iter().map(|&i| cells[i].2).sum::<f64>() / n, idx.iter().map(|&i| cells[i].3).sum::<f64>() / n)
+        };
+        let means: Vec<(f64, f64)> = groups.values().map(|idx| mean(idx)).collect();
+        let n = means.len() as f64;
+        let (clat, clon) = (means.iter().map(|m| m.0).sum::<f64>() / n, means.iter().map(|m| m.1).sum::<f64>() / n);
+        let m_lon = METRES_PER_DEGREE * clat.to_radians().cos();
+        for (idx, (lat, lon)) in groups.values().zip(&means) {
+            let (dx, dy) = ((lon - clon) * m_lon, (lat - clat) * METRES_PER_DEGREE);
+            if dx.hypot(dy) >= MIN_SECTOR_OFFSET_M {
+                let azimuth = dx.atan2(dy).to_degrees().rem_euclid(360.0);
+                for &i in idx {
+                    azimuths[i] = Some(azimuth);
+                }
+            }
+        }
+    }
+    azimuths
 }
 
 /// Median distance from each of the nearest cells to its nearest other cell, ignoring

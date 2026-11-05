@@ -45,6 +45,19 @@ By default the model fades every cell out at one shared maximum range (4× the t
 
 Using field 12 as each cell's *strength* was tried first and rejected: a few cells have values above 40 km, and treated as strength they outshout nearby cells everywhere, so the Kon Tum cell vanished entirely. The option therefore only uses the cell's own value, for where it fades out; competition between cells stays distance-based.
 
+## Antenna directions
+
+![Both cells with round coverage and with estimated antenna directions](antenna-comparison.png)
+
+By default each cell's coverage is round. With "Antenna directions" ticked on the map (or `--directional` with `--geojson`), sectors get a sector antenna's wedge-shaped pattern (65° beamwidth, 20 dB front-to-back), pointing from their site's centre towards the sector's position; the orange line shows this cell's direction.
+
+| Cell | Direction | Round: area / reach | Wedge: area / reach |
+|---|---|---|---|
+| Kon Tum | 336° | 0.103 km² / 226 m | 0.103 km² / 316 m |
+| Da Nang | 347° | 0.192 km² / 341 m | 0.095 km² / 373 m |
+
+The Kon Tum site shows the idea working: its three band-3 sectors come out at 102°, 222° and 336°, almost exactly 120° apart, and the band-1 sector sharing sector 3's PCI gets the same 336°. Across 16,894 crawled three-sector sites the estimate is much rougher: half have their three directions within 150° of evenly spread, against 29% for random positions treated the same way, so there is a real signal but plenty of noise. That's why it's off by default.
+
 ## Contour lines on the HTML map
 
 ![Contour lines on the HTML maps](contour-lines.png)

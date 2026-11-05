@@ -21,7 +21,7 @@ You can query the location of a single MAC using `wtfps query`:
 ```
 $ wtfps query 90:CD:B6:11:50:D9
 https://www.openstreetmap.org/search?query=53.220985410000004%2F-4.20290374#map=12/53.220985410000004/-4.20290374
-[src/main.rs:55:17] wifis.len() = 400
+400 networks in reply
 ```
 
 ### `explore`
@@ -63,10 +63,12 @@ You can query the location of a single cell tower using `wtfps cell <mcc> <mnc> 
 $ wtfps cell 284 5 106 451645
 cellid: 451645
 https://www.openstreetmap.org/search?query=42.6671791%2F23.277446740000002#map=16/42.6671791/23.277446740000002
-[src/main.rs:196:17] cells.len() = 121
+121 entries in reply
 cellid 451645		horizontal_accuracy Some(1414)		location https://www.openstreetmap.org/search?query=42.6671791%2F23.277446740000002#map=16/42.6671791/23.277446740000002
 ...
 ```
+
+Each row shows the cell's MNC, TAC, EARFCN with its LTE band, PCI, accuracy and location; the tracking-area estimates are labelled `area est.`.
 
 Add `--raw` to see every field of Apple's reply, including ones wtfps doesn't decode: each field path (`22` is the list of cells, `22.5` a cell's location, `22.5.3` its accuracy) with how often it occurs, how many distinct values it has, and the most common values.
 
@@ -126,7 +128,7 @@ select count(*), count(*) filter (where found) from cell_probe;
 
 For each cell wtfps also stores the LTE channel (`earfcn`) and physical cell ID (`pci`) when Apple reports them; Apple reports them for neighbouring cells but not for the cell you query. Cells crawled before these columns existed pick them up when they appear in a later reply.
 
-`crawled_at` records when each cell was last crawled, i.e. returned in a reply (refreshed at most hourly); cells crawled before it was added have no value. Two undocumented location fields are stored too, so their meaning can be worked out from the data: `unknown_11` (about 940 for real cells, 1 for tracking-area estimates; possibly a version or age) and `unknown_12` (varies widely and tracks the accuracy; possibly a finer accuracy figure before Apple's 1414 m minimum).
+`altitude` and `vertical_acc` (metres) are stored when a reply includes them; so far Apple has only sent `-1` (unknown) for both, on cells it didn't find. `crawled_at` records when each cell was last crawled, i.e. returned in a reply (refreshed at most hourly); cells crawled before it was added have no value. Two undocumented location fields are stored too, so their meaning can be worked out from the data: `unknown_11` (about 940 for real cells, 1 for tracking-area estimates; possibly a version or age) and `unknown_12` (varies widely and tracks the accuracy; possibly a finer accuracy figure before Apple's 1414 m minimum).
 
 ### `heatmap`
 
@@ -162,6 +164,7 @@ The GeoJSON also contains the modelled coverage, calculated by wtfps with the sa
 | `--acc-weight` | 0 | how much each cell's position is blurred by its accuracy |
 | `--range-km` | 4× typical spacing | distance at which signal fades out |
 | `--all-frequencies` | off | compete with cells on every frequency, not just the cell's own EARFCN |
+| `--directional` | off | experimental: sectors get a wedge-shaped antenna pattern pointing the way their position is offset from their site's centre (a rough estimate) |
 | `--use-unknown-12` | off | experimental: fade out at the cell's own reach from Apple's field 12 instead of the shared range; see [examples](examples/README.md#comparison-fading-out-at-the-cells-own-reach-field-12) |
 | `--hex-res` | 10 | H3 resolution of the hexagons (10: ~0.015 km², 11: ~0.002 km²) |
 | `--contours` | off | write smooth likelihood contour bands instead of hexagons |
