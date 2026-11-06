@@ -220,7 +220,7 @@ GET /cells/{mcc}/{mnc}/{tac}/{cell}/heatmap                  HTML map
 GET /cells/{mcc}/{mnc}/{tac}/{cell}/heatmap?format=geojson   GeoJSON
 ```
 
-The same lookup as `heatmap`: the cell is looked up in the database; if it isn't crawled yet, it's fetched from Apple with its site's sibling sectors (five requests, about a second) and saved together with every other cell in the replies, then the map is drawn. Later requests for the same cell are served from the database (tens of milliseconds). The HTML map has all the controls above; the GeoJSON uses the default model settings and a 50 km radius.
+The same lookup as `heatmap`: the cell is looked up in the database; if it isn't crawled yet, it's fetched from Apple with its site's sibling sectors (five requests, about a second) and saved together with every other cell in the replies, then the map is drawn. Later requests for the same cell are served from the database (tens of milliseconds). The HTML map has all the controls above; the GeoJSON uses the default model settings and a 50 km radius. On an HTML map served by the API, clicking another cell opens that cell's map (the browser's Back button returns); on a map opened as a file, clicking does nothing.
 
 | Status | When |
 |---|---|

@@ -605,13 +605,31 @@ function showTooltip(point, lines) {
   tooltip.style.top = top + "px";
 }
 
-map.on("mousemove", (e) => {
-  if (!map.getLayer("cells")) return;
+// Pages from the HTTP API can open another cell's map by clicking it; a page written by
+// `wtfps heatmap` and opened as a file has no server to ask. Any path prefix in front of
+// /cells/ (e.g. from a reverse proxy) is kept.
+const API_PATH = /^(.*)\/cells\/\d+\/\d+\/\d+\/\d+\/heatmap\/?$/.exec(location.pathname);
+const fromApi = /^https?:$/.test(location.protocol) && API_PATH !== null;
+const cellUrl = (c) => `${API_PATH[1]}/cells/${c.mcc}/${c.mnc}/${c.tac_id}/${c.cell_id}/heatmap`;
+
+// cells within 12 px of the pointer (a 24 px target around each dot)
+function cellsAt(point) {
+  if (!map.getLayer("cells")) return [];
   const pad = 12;
-  const hits = map.queryRenderedFeatures(
-    [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]],
+  return map.queryRenderedFeatures(
+    [[point.x - pad, point.y - pad], [point.x + pad, point.y + pad]],
     { layers: ["target", "cells"] },
   );
+}
+
+map.on("click", (e) => {
+  const hit = cellsAt(e.point)[0];
+  if (fromApi && hit && hit.properties.i !== 0) location.href = cellUrl(cells[hit.properties.i]);
+});
+
+map.on("mousemove", (e) => {
+  if (!map.getLayer("cells")) return;
+  const hits = cellsAt(e.point);
   const hover = map.getSource("hover-acc");
   if (hits.length) {
     const c = cells[hits[0].properties.i];
@@ -624,6 +642,7 @@ map.on("mousemove", (e) => {
       [`antenna direction ${c.azimuth_deg != null ? Math.round(c.azimuth_deg) + "° (estimate)" : "unknown"}`],
       [`crawled ${c.crawled_at ? c.crawled_at.slice(0, 16).replace("T", " ") + " UTC" : "before crawl times were recorded"}`],
       [hits[0].properties.i === 0 ? "the cell this map is for" : `${fmtKm(c.dist)} from this cell`],
+      ...(fromApi && hits[0].properties.i !== 0 ? [["click to open its map"]] : []),
     ]);
     map.getCanvas().style.cursor = "pointer";
     return;
