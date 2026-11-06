@@ -77,7 +77,7 @@ The HTML maps draw contour lines over the heat: 10, 25, 50, 75 and 90% likelihoo
 
 ## What the model is
 
-An estimate, not a measurement. Each cell's position is Apple's estimate of where the cell is used, not the tower. Signal is modelled as falling off with distance, and a phone is assumed to use the strongest cell on its frequency, allowing for random variation from buildings and terrain. It doesn't know antenna directions, so each sector's area comes out roughly round. See the [`heatmap` section of the main README](../README.md#heatmap) for the fields and options.
+An estimate, not a measurement. Each cell's position is Apple's estimate of where the cell is used, not the tower. Signal is modelled as falling off with distance, and a phone is assumed to use the strongest cell on its frequency, allowing for random variation from buildings and terrain. By default it doesn't model antenna directions, so each sector's area comes out roughly round; the [antenna directions](#antenna-directions) option estimates them, roughly. See the [`heatmap` section of the main README](../README.md#heatmap) for the fields and options.
 
 ## Regenerating
 
