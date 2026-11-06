@@ -132,12 +132,27 @@ For each cell wtfps also stores the LTE channel (`earfcn`) and physical cell ID 
 
 ### `heatmap`
 
-Writes a self-contained HTML map estimating where a crawled cell is likely to serve phones:
+Writes a self-contained HTML map estimating where a cell is likely to serve phones:
 
 ```
 $ wtfps heatmap 452 4 38211 209991683
 wrote cell-452-4-38211-209991683.html (285 nearby cells)
 ```
+
+The cell doesn't have to be crawled yet. If it isn't in the database, wtfps asks Apple for it and for its site's neighbouring sector numbers (the cell's sector ±1 and ±2: Apple's reply for a cell often lacks its own site's other sectors, which antenna directions need), saves every cell in the replies as the crawler would, then draws the map. That's five requests, about a second:
+
+```
+$ wtfps heatmap 284 5 106 451645
+cell wasn't crawled yet: fetched it from Apple and saved 103 cells
+wrote cell-284-5-106-451645.html (36 nearby cells)
+```
+
+The saved cells' areas are queued for the crawler, so a later `explore cell` continues from there. A cell Apple doesn't know is reported and recorded in `cell_not_found`.
+
+| Option | Meaning |
+|---|---|
+| `--online` | build the map from Apple's replies only, without a database: nothing is read or saved, and `DATABASE_URL` isn't needed. The map only has the cells from those five replies (one group of ~100 around the cell), so it's thinner near the group's edge than a crawled area. |
+| `--no-fetch` | only use the database: fail instead of asking Apple for a cell that isn't crawled |
 
 Open the file in a browser. It shows the cell, its accuracy circle, and the nearest cells of the same operator (up to 800 within `--radius-km`, default 15), with two views:
 
@@ -166,12 +181,25 @@ The GeoJSON also contains the modelled coverage, calculated by wtfps with the sa
 | `--all-frequencies` | off | compete with cells on every frequency, not just the cell's own EARFCN |
 | `--directional` | off | experimental: sectors get a wedge-shaped antenna pattern pointing the way their position is offset from their site's centre (a rough estimate) |
 | `--use-unknown-12` | off | experimental: fade out at the cell's own reach from Apple's field 12 instead of the shared range; see [examples](examples/README.md#comparison-fading-out-at-the-cells-own-reach-field-12) |
-| `--hex-res` | 10 | H3 resolution of the hexagons (10: ~0.015 km², 11: ~0.002 km²) |
+| `--hex-res` | 10, coarser for large rural areas | H3 resolution of the hexagons (10: ~0.015 km², 11: ~0.002 km²); chosen automatically so a map has at most ~20,000 |
 | `--contours` | off | write smooth likelihood contour bands instead of hexagons |
 | `--contour-levels` | 0.1,0.25,0.5,0.75,0.9 | where the bands start; the last band runs up to 100% |
 | `--contour-step-m` | 20 | spacing of the grid the contours are traced on |
 
 With `--contours`, the coverage is written as contour bands (`role: "contour"`) instead of hexagons: one MultiPolygon per band between two levels, with `likelihood_min`, `likelihood_max`, a `label` such as `"50–75%"`, and the same `fill` / `fill-opacity` styling. Bands don't overlap: each is a ring around the next, so the area where the cell is the most likely server is the sum of the bands from 50% up. The files are smaller than with hexagons and look like the HTML map's heat, except that the bands start at the lowest level (10% by default) where the map fades down to 2%; add a lower level such as `0.02` to show that faint fringe.
+
+### HTTP API
+
+`GET /cells/{mcc}/{mnc}/{tac}/{cell}/heatmap` returns a cell's coverage map: the same lookup as `heatmap` (database first; a cell that isn't crawled yet is fetched from Apple and saved with every other cell in the replies), as HTML, or as GeoJSON with `?format=geojson`. A cell Apple has no location for gives `404`.
+
+Run it with the database in Docker Compose; it listens on all network interfaces, on `WTFPS_API_PORT` (8090 by default, set in `.env`), with no authentication:
+
+```sh
+docker compose up -d --build api
+curl -o map.html http://localhost:8090/cells/284/5/106/451645/heatmap
+```
+
+Or without Docker: `wtfps serve` (default `--listen 0.0.0.0:8090`).
 
 ### `migrate`
 
@@ -179,11 +207,12 @@ With `--contours`, the coverage is written as contour bands (`role: "contour"`) 
 
 #### Running the database with Docker Compose
 
-You don't need a local Postgres or the SQLx CLI to run the crawler; wtfps creates and updates its tables itself on startup. `docker-compose.yml` runs the `postgis/postgis` image, which provides Postgres with PostGIS, and `psql` runs inside the container. The data lives in the named volume `postgis_data`, so it survives `docker compose down`, restarts and image updates; only `docker compose down -v` deletes it. The port is bound to localhost only. `.env.example` lists the settings: copied to `.env`, both `docker compose` and wtfps read it, and `DATABASE_URL` is built from `POSTGRES_USER`, `POSTGRES_PASSWORD`, `WTFPS_DB_PORT` and `POSTGRES_DB`, so changing one keeps the two in step. The password only takes effect when the volume is first created.
+You don't need a local Postgres or the SQLx CLI to run the crawler; wtfps creates and updates its tables itself on startup. `docker-compose.yml` runs the `postgis/postgis` image, which provides Postgres with PostGIS, and `psql` runs inside the container. The data lives in the volume `postgis_data`, which Compose treats as external: it uses it but never creates or deletes it, so the crawl survives `docker compose down` (even with `-v`), restarts and image updates. Create it once with `docker volume create postgis_data`. The port is bound to localhost only. `.env.example` lists the settings: copied to `.env`, both `docker compose` and wtfps read it, and `DATABASE_URL` is built from `POSTGRES_USER`, `POSTGRES_PASSWORD`, `WTFPS_DB_PORT` and `POSTGRES_DB`, so changing one keeps the two in step. The password only takes effect when the volume is first created.
 
 ```sh
 # 1. start the database (waits until it accepts connections)
 cp .env.example .env      # settings for both wtfps and docker compose
+docker volume create postgis_data     # once; does nothing if it already exists
 docker compose up -d --wait
 
 # 2. build; SQLX_OFFLINE uses the saved query metadata in .sqlx/ instead of a live database
@@ -250,7 +279,7 @@ The crawler also stops by itself once there are no seeds, uncrawled areas or unp
 timeout 10m ./target/release/wtfps explore cell
 ```
 
-`docker compose stop` (or `down`) stops the database and keeps the data. `docker compose down -v` deletes the volume and every crawled cell; export anything you want to keep first.
+`docker compose stop` (or `down`, even `down -v`) stops the database and keeps the data: the volume is external, so Compose never deletes it. Only `docker volume rm postgis_data` would.
 
 #### Switching from a `docker run` container to Compose
 

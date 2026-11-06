@@ -18,8 +18,10 @@ use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, query, query_scalar, PgPool};
 
 
+mod api;
 mod coverage;
 mod fetch;
+mod lookup;
 mod raw;
 use crate::fetch::{AppleWPSClient, Location};
 use crate::protobuf::CellTower;
@@ -61,14 +63,16 @@ enum Command {
     Oui {
         oui: String,
     },
-    /// Write an HTML map estimating the coverage of a crawled cell
+    /// Write an HTML map estimating the coverage of a cell. Uses the database; a cell
+    /// that isn't crawled yet is fetched from Apple (with its site's sibling sectors) and
+    /// saved first
     Heatmap {
         mcc: i32,
         mnc: i32,
         tac_id: i32,
         cell_id: i64,
         /// include same-operator cells within this distance
-        #[arg(long, default_value_t = 15.0)]
+        #[arg(long, default_value_t = DEFAULT_RADIUS_KM)]
         radius_km: f64,
         /// write GeoJSON (the cell, its accuracy circle, the nearby cells and the modelled
         /// coverage as H3 hexagons) instead of HTML
@@ -79,9 +83,20 @@ enum Command {
         /// output file [default: cell-<mcc>-<mnc>-<tac>-<cell>.html or .geojson]
         #[arg(long)]
         out: Option<String>,
+        /// build from Apple's replies only, without a database (nothing is saved)
+        #[arg(long, conflicts_with = "no_fetch")]
+        online: bool,
+        /// only use the database: don't ask Apple for a cell that isn't crawled yet
+        #[arg(long)]
+        no_fetch: bool,
     },
     /// Apply pending database migrations and exit
     Migrate,
+    /// Serve the HTTP API (see src/api.rs)
+    Serve {
+        #[arg(long, default_value = "0.0.0.0:8090")]
+        listen: String,
+    },
 }
 
 /// Coverage model settings for `heatmap --geojson`; the HTML map has sliders for these
@@ -107,8 +122,9 @@ struct ModelArgs {
     #[arg(long)]
     use_unknown_12: bool,
     /// H3 resolution of the coverage hexagons (10: ~0.015 km², 11: ~0.002 km²)
-    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u8).range(7..=12))]
-    hex_res: u8,
+    /// [default: 10, coarser for large rural areas]
+    #[arg(long, value_parser = clap::value_parser!(u8).range(7..=12))]
+    hex_res: Option<u8>,
     /// experimental: give sectors a wedge-shaped antenna pattern, pointing the way their
     /// position is offset from their site's centre (a rough estimate)
     #[arg(long)]
@@ -227,18 +243,39 @@ async fn main() -> Result<()> {
 
         }
 
-        Command::Heatmap { mcc, mnc, tac_id, cell_id, radius_km, geojson, model, out } => {
-            let pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&database_url()?)
-                .await?;
+        Command::Heatmap { mcc, mnc, tac_id, cell_id, radius_km, geojson, model, out, online, no_fetch } => {
+            let key = (mcc, mnc, tac_id, cell_id);
+            let rows = if online {
+                let results = lookup::fetch_with_siblings(&client, key).await?;
+                let rows = lookup::nearby_from_replies(key, radius_km, HEATMAP_MAX_CELLS as usize, results)?;
+                println!("fetched {} cells of this operator from Apple (not saved)", rows.len());
+                rows
+            } else {
+                let pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&database_url()?)
+                    .await?;
+                let (rows, source) = lookup::nearby_or_fetch(&client, &pool, key, radius_km, !no_fetch).await?;
+                if let lookup::Source::Fetched(found) = source {
+                    println!("cell wasn't crawled yet: fetched it from Apple and saved {found} cells");
+                }
+                rows
+            };
             let extension = if geojson { "geojson" } else { "html" };
             let path =
                 out.unwrap_or_else(|| format!("cell-{mcc}-{mnc}-{tac_id}-{cell_id}.{extension}"));
-            let key = (mcc, mnc, tac_id, cell_id);
-            let model = geojson.then_some(model);
-            let neighbours = write_heatmap(&pool, key, radius_km, &path, model).await?;
+            let (document, neighbours) = heatmap_document(key, rows, geojson.then_some(model))?;
+            std::fs::write(&path, document)?;
             println!("wrote {path} ({neighbours} nearby cells)");
+        }
+
+        Command::Serve { listen } => {
+            let pool = PgPoolOptions::new()
+                .max_connections(CONCURRENT_PARTS as _)
+                .connect(&database_url()?)
+                .await?;
+            sqlx::migrate!().run(&pool).await?;
+            api::serve(client, pool, &listen).await?;
         }
 
         Command::Migrate => {
@@ -553,13 +590,15 @@ async fn explore_cells(client: &AppleWPSClient, pool: &PgPool, probe: bool) -> R
     Ok(())
 }
 
-async fn commit_cells(
-    pool: &PgPool,
-    queried: &[CellKey],
-    mut crawled: BTreeSet<CellArea>,
+/// A found cell's location with any EARFCN / PCI seen for it.
+type FoundCell = (Location, Option<i32>, Option<i32>);
+
+/// Cells from one or more replies: those with a location (merged when a cell appears in
+/// several replies) and those without one. Tracking-area estimates are dropped.
+fn merge_found(
     results: Vec<(CellTower, Option<Location>)>,
-) -> Result<()> {
-    let mut found = BTreeMap::new();
+) -> (BTreeMap<CellKey, FoundCell>, BTreeSet<CellKey>) {
+    let mut found: BTreeMap<CellKey, FoundCell> = BTreeMap::new();
     let mut not_found = BTreeSet::new();
     for (cell, loc) in results {
         // Apple includes entries with cell_id u32::MAX (-1): per-TAC location estimates
@@ -580,6 +619,17 @@ async fn commit_cells(
             }
         }
     }
+    not_found.retain(|key| !found.contains_key(key));
+    (found, not_found)
+}
+
+async fn commit_cells(
+    pool: &PgPool,
+    queried: &[CellKey],
+    mut crawled: BTreeSet<CellArea>,
+    results: Vec<(CellTower, Option<Location>)>,
+) -> Result<()> {
+    let (found, mut not_found) = merge_found(results);
     // a queried cell missing from its own response is also not found
     not_found.extend(queried.iter().copied());
     not_found.retain(|key| !found.contains_key(key));
@@ -993,10 +1043,24 @@ async fn backfill_cell_areas(pool: &PgPool) -> Result<()> {
 }
 
 const HEATMAP_TEMPLATE: &str = include_str!("heatmap.html");
+/// same-operator cells within this distance are included in a heatmap (the nearest
+/// HEATMAP_MAX_CELLS of them, so towns stay as dense as before and rural cells, which reach
+/// tens of km, still see their competitors)
+const DEFAULT_RADIUS_KM: f64 = 50.0;
+
+/// The coverage model's default settings (as with no command-line options).
+fn default_model() -> ModelArgs {
+    #[derive(Parser)]
+    struct Defaults {
+        #[command(flatten)]
+        model: ModelArgs,
+    }
+    Defaults::parse_from(["wtfps"]).model
+}
 /// the page models every cell for every pixel, so keep the nearest ones only
 const HEATMAP_MAX_CELLS: i64 = 800;
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx::FromRow, Clone)]
 struct NearbyCell {
     tac_id: i32,
     cell_id: i64,
@@ -1017,17 +1081,10 @@ struct NearbyCell {
     generated: String,
 }
 
-/// Write a self-contained HTML coverage map (or GeoJSON) for one cell, with the nearest
-/// cells of the same operator. Returns the number of nearby cells included.
-async fn write_heatmap(
-    pool: &PgPool,
-    key: CellKey,
-    radius_km: f64,
-    path: &str,
-    geojson: Option<ModelArgs>,
-) -> Result<usize> {
+/// The cell (if crawled) and the nearest crawled cells of its operator, nearest first.
+async fn nearby_from_db(pool: &PgPool, key: CellKey, radius_km: f64) -> Result<Vec<NearbyCell>> {
     let (mcc, mnc, tac_id, cell_id) = key;
-    let mut rows: Vec<NearbyCell> = sqlx::query_as(
+    Ok(sqlx::query_as(
         "with t as (select geom from cell \
                     where mcc = $1 and mnc = $2 and tac_id = $3 and cell_id = $4) \
          select c.tac_id, c.cell_id, ST_Y(c.geom::geometry) as lat, ST_X(c.geom::geometry) as lon, \
@@ -1047,7 +1104,18 @@ async fn write_heatmap(
     .bind(radius_km * 1000.0)
     .bind(HEATMAP_MAX_CELLS)
     .fetch_all(pool)
-    .await?;
+    .await?)
+}
+
+/// The HTML coverage map, or with `geojson` the GeoJSON, for the cell `key` from `rows`
+/// (the cell and its operator's nearby cells, nearest first). Returns the document and the
+/// number of nearby cells in it.
+fn heatmap_document(
+    key: CellKey,
+    mut rows: Vec<NearbyCell>,
+    geojson: Option<ModelArgs>,
+) -> Result<(String, usize)> {
+    let (mcc, mnc, tac_id, cell_id) = key;
 
     // estimated from all of the operator's nearby cells, every frequency: a site's sectors
     // use several bands
@@ -1065,28 +1133,15 @@ async fn write_heatmap(
     };
     let is_target = |c: &&NearbyCell| (c.tac_id, c.cell_id) == (tac_id, cell_id);
     let Some(target) = rows.iter().find(is_target) else {
-        anyhow::bail!(
-            "cell {mcc}/{mnc}/{tac_id}/{cell_id} is not in the database; \
-             add it to cell_todo and run `explore cell` first"
-        );
+        anyhow::bail!("no location for cell {mcc}/{mnc}/{tac_id}/{cell_id}");
     };
     let nearby: Vec<&NearbyCell> = rows.iter().filter(|c| !is_target(c)).collect();
 
     if let Some(model) = geojson {
-        let accuracy: Option<String> = sqlx::query_scalar(
-            "select ST_AsGeoJSON(ST_Buffer(geom, acc, 'quad_segs=16'), 7) from cell \
-             where mcc = $1 and mnc = $2 and tac_id = $3 and cell_id = $4 and acc > 0",
-        )
-        .bind(mcc)
-        .bind(mnc)
-        .bind(tac_id)
-        .bind(cell_id)
-        .fetch_optional(pool)
-        .await?;
+        let accuracy = target.acc.filter(|&a| a > 0).map(|a| accuracy_circle(target.lat, target.lon, a as f64));
         let coverage = model_coverage(target, &nearby, &model)?;
         let geojson = cell_geojson(mcc, mnc, target, &nearby, accuracy, &coverage)?;
-        std::fs::write(path, geojson.to_string())?;
-        return Ok(nearby.len());
+        return Ok((geojson.to_string(), nearby.len()));
     }
 
     let data = json!({
@@ -1098,8 +1153,20 @@ async fn write_heatmap(
     // the JSON goes inside a <script> element
     let data = data.to_string().replace("</", "<\\/");
     let html = HEATMAP_TEMPLATE.replacen("/*DATA*/null", &data, 1);
-    std::fs::write(path, html)?;
-    Ok(nearby.len())
+    Ok((html, nearby.len()))
+}
+
+/// A circle of `radius_m` around a point as a GeoJSON polygon geometry (64 sides).
+fn accuracy_circle(lat: f64, lon: f64, radius_m: f64) -> serde_json::Value {
+    let m_lon = 111_320.0 * lat.to_radians().cos();
+    let ring: Vec<[f64; 2]> = (0..=64)
+        .map(|i| {
+            let a = std::f64::consts::TAU * f64::from(i % 64) / 64.0;
+            let round = |v: f64| (v * 1e7).round() / 1e7;
+            [round(lon + radius_m * a.cos() / m_lon), round(lat + radius_m * a.sin() / 111_320.0)]
+        })
+        .collect();
+    json!({"type": "Polygon", "coordinates": [ring]})
 }
 
 /// GeoJSON FeatureCollection: the cell (role "cell"), its accuracy circle ("accuracy")
@@ -1109,7 +1176,7 @@ fn cell_geojson(
     mnc: i32,
     target: &NearbyCell,
     nearby: &[&NearbyCell],
-    accuracy: Option<String>,
+    accuracy: Option<serde_json::Value>,
     coverage: &ModelledCoverage,
 ) -> Result<serde_json::Value> {
     let properties = |c: &NearbyCell, role: &str| {
@@ -1152,7 +1219,7 @@ fn cell_geojson(
         "path_loss": m.path_loss,
         "sigma_db": m.sigma_db,
         "acc_weight": m.acc_weight,
-        "hex_res": m.hex_res,
+        "hex_res": u8::from(coverage.result.resolution),
         "contour_levels": m.contours.then_some(&m.contour_levels),
     });
     // drawn in order: coverage underneath, then the accuracy circle, nearby cells, the cell
@@ -1212,7 +1279,7 @@ fn cell_geojson(
     if let Some(circle) = accuracy {
         features.push(json!({
             "type": "Feature",
-            "geometry": serde_json::from_str::<serde_json::Value>(&circle)?,
+            "geometry": circle,
             "properties": {
                 "role": "accuracy", "cell_id": target.cell_id, "radius_m": target.acc,
                 "stroke": STYLE_TARGET, "stroke-width": 1.5, "stroke-opacity": 1, "fill-opacity": 0,
@@ -1228,8 +1295,10 @@ fn cell_geojson(
         features.push(feature);
     }
     if let (true, Some(azimuth)) = (m.directional, target.azimuth_deg) {
-        // a short line from the cell in its estimated antenna direction
-        let length = 300.0;
+        // a line from the cell in its estimated antenna direction, a quarter of the range it
+        // fades out at (at least 300 m), as on the HTML map
+        let fade = coverage.result.target_reach_m.unwrap_or(coverage.result.range_m);
+        let length = (fade / 4.0).max(300.0);
         let rad = azimuth.to_radians();
         let end = [
             target.lon + length * rad.sin() / (111_320.0 * target.lat.to_radians().cos()),
@@ -1272,12 +1341,14 @@ fn ramp_color(value: f64) -> String {
     format!("#{:02x}{:02x}{:02x}", mix(0), mix(1), mix(2))
 }
 
-/// weak values fade into the basemap, as on the HTML map
+/// weak values fade into the basemap, as on the HTML map: from nothing at 2% up to 0.265
+/// at 10%, then 0.2 + 0.65 v, at most 0.8
 fn heat_opacity(value: f64) -> f64 {
     if value < 0.02 {
         return 0.0;
     }
-    ((0.2 + 0.65 * value.min(1.0)).min(0.8) * 100.0).round() / 100.0
+    let opacity = if value < 0.1 { 2.65 * value } else { (0.2 + 0.65 * value.min(1.0)).min(0.8) };
+    (opacity * 100.0).round() / 100.0
 }
 
 struct ModelledCoverage<'a> {
@@ -1321,7 +1392,7 @@ fn model_coverage<'a>(
         range_m: model.range_km.map(|km| km * 1000.0),
         use_reach: model.use_unknown_12,
         directional: model.directional,
-        resolution: Resolution::try_from(model.hex_res)?,
+        resolution: model.hex_res.map(Resolution::try_from).transpose()?,
     };
     let levels = &model.contour_levels;
     if model.contours

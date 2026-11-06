@@ -1,9 +1,12 @@
-# PostGIS database for wtfps. Data lives in the named volume postgis_data, so it survives
-# `docker compose down` and container rebuilds; only `docker compose down -v` deletes it.
-# The volume name is fixed (not prefixed with the project name), so a database started
-# earlier with `docker run -v postgis_data:/var/lib/postgresql/data` is picked up as is.
-# Never run that container and this service at the same time: two servers on one data
-# directory can corrupt it.
+# PostGIS database for wtfps. Data lives in the named volume postgis_data, which is external:
+# Compose uses it but never creates or deletes it, so the crawl survives `docker compose down`,
+# `down -v` and rebuilds. Create it once before the first start:
+#
+#   docker volume create postgis_data
+#
+# A database started earlier with `docker run -v postgis_data:/var/lib/postgresql/data` is
+# picked up as is. Never run that container and this service at the same time: two servers
+# on one data directory can corrupt it.
 #
 #   docker compose up -d
 #   DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/wtfps   (in .env)
@@ -31,6 +34,21 @@ services:
       timeout: 5s
       retries: 20
 
+  # HTTP API: GET /cells/{mcc}/{mnc}/{tac}/{cell}/heatmap. Reachable from the LAN on
+  # WTFPS_API_PORT; no authentication.
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-test}@db:5432/${POSTGRES_DB:-wtfps}
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "${WTFPS_API_PORT:-8090}:8090"
+
 volumes:
   postgis_data:
+    external: true
     name: postgis_data

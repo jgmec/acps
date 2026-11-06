@@ -47,7 +47,8 @@ pub struct Params {
     pub use_reach: bool,
     /// give cells with an estimated antenna direction a sector antenna's gain
     pub directional: bool,
-    pub resolution: Resolution,
+    /// hexagon size; None picks one from the modelled area's size
+    pub resolution: Option<Resolution>,
 }
 
 pub struct Hex {
@@ -67,6 +68,8 @@ const SUMMARY_REFINE: usize = 2;
 
 pub struct Coverage {
     pub hexes: Vec<Hex>,
+    /// hexagon resolution used
+    pub resolution: Resolution,
     pub range_m: f64,
     /// with `use_reach`: the target's reach, or None if it has no field 12 (then the
     /// shared range is used)
@@ -76,6 +79,19 @@ pub struct Coverage {
     /// furthest hexagon centre with likelihood > 50%
     pub reach_m: f64,
 }
+
+/// Bounds of the automatic max range: 4x the typical cell spacing, from town cells to rural
+/// low-band cells reaching tens of km. The page (src/heatmap.html) uses the same numbers.
+const MIN_RANGE_M: f64 = 1500.0;
+const MAX_RANGE_M: f64 = 60_000.0;
+/// How far out, in max ranges, the coverage is evaluated. The fade-out is gradual (about 15%
+/// at twice the range where no other cell competes, 6% at three times), so a tighter area
+/// cuts the coverage off with a visible straight edge.
+const EXTENT_PER_RANGE: f64 = 3.0;
+/// With an automatic hexagon size, the finest resolution with at most this many hexagons
+/// across the modelled area's radius (about 20,000 in all), so rural maps stay small.
+const AUTO_RES_RINGS: f64 = 80.0;
+const FINEST_AUTO_RES: Resolution = Resolution::Ten;
 
 /// The model set up for one target: competitor positions in metres around the target and
 /// the constants of the received-power logit. `cells[0]` is the target.
@@ -129,10 +145,10 @@ impl Model {
         model.xy = cells.iter().map(|c| model.to_xy(c.lat, c.lon)).collect();
         model.range_m = params
             .range_m
-            .unwrap_or_else(|| (4.0 * typical_spacing(&model.xy)).clamp(1500.0, 15000.0));
+            .unwrap_or_else(|| (4.0 * typical_spacing(&model.xy)).clamp(MIN_RANGE_M, MAX_RANGE_M));
         let fade = model.target_reach_m.unwrap_or(model.range_m);
         model.p_edge = -model.k * fade.ln();
-        model.extent = (fade * 1.2).clamp(1500.0, 15000.0);
+        model.extent = (fade * EXTENT_PER_RANGE).clamp(MIN_RANGE_M, MAX_RANGE_M);
         model
     }
 
@@ -170,17 +186,28 @@ pub fn compute(cells: &[ModelCell], params: &Params) -> Result<Coverage> {
     let mut power = vec![0.0; cells.len()];
 
     // every hexagon whose centre lies within the modelled extent around the target
-    let spacing = params.resolution.edge_length_m() * 3f64.sqrt();
+    let resolution = params.resolution.unwrap_or_else(|| {
+        let mut res = FINEST_AUTO_RES;
+        while model.extent / (res.edge_length_m() * 3f64.sqrt()) > AUTO_RES_RINGS {
+            match res.pred() {
+                Some(coarser) => res = coarser,
+                None => break,
+            }
+        }
+        res
+    });
+    let spacing = resolution.edge_length_m() * 3f64.sqrt();
     let rings = (model.extent / spacing).ceil() as u32 + 1;
-    let centre = LatLng::new(model.target_lat, model.target_lon)?.to_cell(params.resolution);
+    let centre = LatLng::new(model.target_lat, model.target_lon)?.to_cell(resolution);
 
-    let mut fine = params.resolution;
+    let mut fine = resolution;
     for _ in 0..SUMMARY_REFINE {
         fine = fine.succ().unwrap_or(fine);
     }
 
     let mut coverage = Coverage {
         hexes: vec![],
+        resolution,
         range_m: model.range_m,
         target_reach_m: model.target_reach_m,
         area_km2: 0.0,

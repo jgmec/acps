@@ -158,7 +158,7 @@ th { color: var(--text-secondary); font-weight: 500; }
     <label>Path-loss exponent <output id="n-out"></output><input id="n" type="range" min="2" max="5" step="0.1" value="3.5"></label>
     <label>Signal variation (dB) <output id="sigma-out"></output><input id="sigma" type="range" min="2" max="14" step="0.5" value="8"></label>
     <label>Accuracy weight <output id="k-out"></output><input id="k" type="range" min="0" max="1" step="0.05" value="0"></label>
-    <label>Max range (km) <output id="range-out"></output><input id="range" type="range" min="0.5" max="20" step="0.1"></label>
+    <label>Max range (km) <output id="range-out"></output><input id="range" type="range" min="0.5" max="60" step="0.1"></label>
     <label style="flex-direction:row;align-items:center"><input type="checkbox" id="same-freq" checked> <span id="same-freq-label"></span></label>
     <label style="flex-direction:row;align-items:center"><input type="checkbox" id="contours" checked> Contour lines</label>
     <label style="flex-direction:row;align-items:center"><input type="checkbox" id="directional"> <span id="directional-label">Antenna directions (rough estimate)</span></label>
@@ -217,7 +217,10 @@ const DATA = /*DATA*/null;
 
 const RAMP = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
               "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"];
-const GRID = 240;
+const GRID = 320;
+// as in src/coverage.rs: automatic max range bounds, and how far out (in max ranges) the
+// coverage is drawn; the fade-out is gradual, so a tighter area shows a straight cut
+const MIN_RANGE_M = 1500, MAX_RANGE_M = 60000, EXTENT_PER_RANGE = 3;
 const SIGNAL_DB = 30;
 
 const isDark = () => {
@@ -297,7 +300,7 @@ function typicalSpacing() {
 }
 function resetRange() {
   updateActive();
-  const auto = Math.min(15000, Math.max(1500, 4 * typicalSpacing()));
+  const auto = Math.min(MAX_RANGE_M, Math.max(MIN_RANGE_M, 4 * typicalSpacing()));
   $("range").value = (auto / 1000).toFixed(1);
 }
 resetRange();
@@ -372,7 +375,7 @@ let fitted = false;
 
 function render() {
   const p = params();
-  extent = Math.min(15000, Math.max(p.fade * 1.2, 1500));
+  extent = Math.min(MAX_RANGE_M, Math.max(p.fade * EXTENT_PER_RANGE, MIN_RANGE_M));
   const ctx = canvas.getContext("2d");
   const img = ctx.createImageData(GRID, GRID);
   const step = 2 * extent / GRID;
@@ -393,7 +396,8 @@ function render() {
       if (v < 0.02) continue;
       const [cr, cg, cb] = rampColor(v);
       img.data[o] = cr; img.data[o + 1] = cg; img.data[o + 2] = cb;
-      img.data[o + 3] = Math.round(255 * Math.min(0.8, 0.2 + 0.65 * Math.min(1, v)));
+      // fades in from nothing at 2% so the edge of the drawn area doesn't show
+      img.data[o + 3] = Math.round(255 * (v < 0.1 ? 2.65 * v : Math.min(0.8, 0.2 + 0.65 * Math.min(1, v))));
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -407,12 +411,18 @@ function render() {
   if (source) source.updateImage({ url: canvas.toDataURL(), coordinates });
   else addLayers(coordinates);
   map.getSource("contours").setData(contourLines(values, step, p));
+  map.getSource("antenna").setData(antennaLine(p.fade));
   map.setLayoutProperty("antenna", "visibility", p.directional ? "visible" : "none");
   const visibility = $("contours").checked ? "visible" : "none";
   for (const id of ["contour-lines", "contour-labels"]) map.setLayoutProperty(id, "visibility", visibility);
   if (!fitted) {
+    // open on the cell's range rather than the whole drawn area, whose faint outer part
+    // is mostly the fade-out
     fitted = true;
-    map.fitBounds([[west, south], [east, north]], { padding: 20, animate: false });
+    const view = Math.min(extent, Math.max(p.fade * 1.2, MIN_RANGE_M));
+    const [vNorth, vWest] = toLatLon(-view, view);
+    const [vSouth, vEast] = toLatLon(view, -view);
+    map.fitBounds([[vWest, vSouth], [vEast, vNorth]], { padding: 20, animate: false });
   }
 }
 
@@ -482,10 +492,12 @@ function updateText(p) {
   }));
 }
 
-// a short line from this cell in its estimated antenna direction
-function antennaLine() {
+// a line from this cell in its estimated antenna direction, a quarter of its range long
+// (at least 300 m) so it stays visible from town cells to rural ones; as in src/main.rs
+function antennaLine(fade) {
   if (Number.isNaN(azimuth[0])) return { type: "FeatureCollection", features: [] };
-  const [lat, lon] = toLatLon(300 * Math.sin(azimuth[0]), 300 * Math.cos(azimuth[0]));
+  const length = Math.max(300, fade / 4);
+  const [lat, lon] = toLatLon(length * Math.sin(azimuth[0]), length * Math.cos(azimuth[0]));
   return { type: "Feature", geometry: { type: "LineString", coordinates: [[t.lon, t.lat], [lon, lat]] }, properties: {} };
 }
 
@@ -530,7 +542,7 @@ function addLayers(coordinates) {
     },
     paint: { "text-color": css("--text-primary"), "text-halo-color": css("--surface-1"), "text-halo-width": 1.5 },
   });
-  map.addSource("antenna", { type: "geojson", data: antennaLine() });
+  map.addSource("antenna", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
   map.addLayer({ id: "antenna", type: "line", source: "antenna", paint: { "line-color": css("--target"), "line-width": 2 } });
   map.addSource("acc", { type: "geojson", data: circle(t.lat, t.lon, acc[0]) });
   map.addLayer({ id: "acc", type: "line", source: "acc", paint: { "line-color": css("--target"), "line-width": 1.5 } });
