@@ -159,6 +159,10 @@ th { color: var(--text-secondary); font-weight: 500; }
     <label>Signal variation (dB) <output id="sigma-out"></output><input id="sigma" type="range" min="2" max="14" step="0.5" value="8"></label>
     <label>Accuracy weight <output id="k-out"></output><input id="k" type="range" min="0" max="1" step="0.05" value="0"></label>
     <label>Max range (km) <output id="range-out"></output><input id="range" type="range" min="0.5" max="60" step="0.1"></label>
+    <label>Propagation model <select id="propagation">
+      <option value="hata">Okumura–Hata (COST-231)</option>
+      <option value="simple">Simple (distance only)</option>
+    </select></label>
     <label style="flex-direction:row;align-items:center"><input type="checkbox" id="same-freq" checked> <span id="same-freq-label"></span></label>
     <label style="flex-direction:row;align-items:center"><input type="checkbox" id="contours" checked> Contour lines</label>
     <label style="flex-direction:row;align-items:center"><input type="checkbox" id="directional"> <span id="directional-label">Antenna directions (rough estimate)</span></label>
@@ -192,12 +196,17 @@ th { color: var(--text-secondary); font-weight: 500; }
 
   <p class="note">
     This is a model, not a measurement. Each cell's position is Apple's estimate of where the cell is used, not the
-    tower location. Signal is modelled as falling off with distance (path-loss exponent: about 2 in open country,
-    3–4 in towns), and a phone is assumed to use whichever cell of its operator is strongest, allowing for random
+    tower location. Signal is modelled as falling off with distance (path-loss exponent: about 3.4–3.7 for masts
+    of 50–15 m, Okumura–Hata's distance slope), and lower frequencies carry further (Okumura–Hata's frequency
+    term, which matters when comparing cells on different frequencies), and a phone is assumed to use whichever cell of its operator is strongest, allowing for random
     signal variation from buildings and terrain. <em>Serving likelihood</em> is the chance this cell is the strongest at
     a spot. <em>Relative signal</em> is this cell's modelled level above the edge of coverage, ignoring other cells.
     Accuracy weight blurs each cell's position by its accuracy; at 0 positions are taken as exact. Max range is the
-    distance at which signal is assumed to fade out; it starts from 4× the typical spacing between nearby cells.
+    distance at which signal is assumed to fade out. It starts from Okumura–Hata's cell radius for this cell's band
+    (30 m mast, 140 dB maximum path loss), in an urban, suburban or rural setting judged by how far apart the
+    competing cells are (under 800 m, under 2 km, or more); without a known band, from 4× that spacing. The
+    propagation model selector switches to the simple model instead: distance only, every frequency equal, and the
+    max range from 4× the cell spacing.
     Antenna directions (off by default) give each sector a wedge-shaped antenna pattern, pointing from its site's
     centre towards the sector's position. Apple places sectors where phones saw them, which is partly in the direction
     the antenna faces, but it's a rough estimate: on real three-sector sites the estimated directions are only somewhat
@@ -254,10 +263,39 @@ cells.forEach((c, i) => {
 });
 
 // LTE downlink EARFCN ranges (3GPP TS 36.101) of common bands
-const BANDS = [[0, 599, 1, 2100], [600, 1199, 2, 1900], [1200, 1949, 3, 1800], [1950, 2399, 4, 1700],
-  [2400, 2649, 5, 850], [2750, 3449, 7, 2600], [3450, 3799, 8, 900], [5010, 5179, 12, 700],
-  [5180, 5279, 13, 700], [6150, 6449, 20, 800], [9210, 9659, 28, 700], [37750, 38249, 38, 2600],
-  [38650, 39649, 40, 2300], [39650, 41589, 41, 2500], [41590, 43589, 42, 3500]];
+// [first EARFCN, last, band, nominal MHz, downlink MHz at the first EARFCN (+0.1 per step)];
+// the same table as LTE_BANDS in src/coverage.rs
+const BANDS = [[0, 599, 1, 2100, 2110], [600, 1199, 2, 1900, 1930], [1200, 1949, 3, 1800, 1805],
+  [1950, 2399, 4, 1700, 2110], [2400, 2649, 5, 850, 869], [2750, 3449, 7, 2600, 2620],
+  [3450, 3799, 8, 900, 925], [5010, 5179, 12, 700, 729], [5180, 5279, 13, 700, 746],
+  [6150, 6449, 20, 800, 791], [9210, 9659, 28, 700, 758], [37750, 38249, 38, 2600, 2570],
+  [38650, 39649, 40, 2300, 2300], [39650, 41589, 41, 2500, 2496], [41590, 43589, 42, 3500, 3400]];
+function downlinkMhz(earfcn) {
+  const b = earfcn == null ? null : BANDS.find(([lo, hi]) => earfcn >= lo && earfcn <= hi);
+  return b ? b[4] + 0.1 * (earfcn - b[0]) : NaN;
+}
+
+// Okumura-Hata (to 1500 MHz) / COST-231 Hata (above, extrapolated past 2000 MHz), as in
+// src/coverage.rs: 30 m mast, phone at 1.5 m, 140 dB maximum path loss; the environment
+// from the typical spacing of competing cells (urban under 800 m, suburban under 2000 m)
+const HATA_MAST_M = 30, HATA_PHONE_M = 1.5, HATA_MAX_PATH_LOSS_DB = 140;
+const environmentOf = (spacing) => spacing < 800 ? "urban" : spacing < 2000 ? "suburban" : "rural";
+function hataCorrectionDb(mhz, environment) {
+  const lf = Math.log10(mhz);
+  if (environment === "suburban") return -2 * Math.log10(mhz / 28) ** 2 - 5.4;
+  if (environment === "rural") return -4.78 * lf ** 2 + 18.33 * lf - 40.94;
+  return 0;
+}
+function hataLoss1kmDb(mhz, environment) {
+  const lf = Math.log10(mhz);
+  const phone = (1.1 * lf - 0.7) * HATA_PHONE_M - (1.56 * lf - 0.8);
+  const base = mhz <= 1500 ? 69.55 + 26.16 * lf : 46.3 + 33.9 * lf;
+  return base - 13.82 * Math.log10(HATA_MAST_M) - phone + hataCorrectionDb(mhz, environment);
+}
+function hataRadiusM(mhz, environment) {
+  const slope = 44.9 - 6.55 * Math.log10(HATA_MAST_M);
+  return 1000 * 10 ** ((HATA_MAX_PATH_LOSS_DB - hataLoss1kmDb(mhz, environment)) / slope);
+}
 function band(earfcn) {
   const b = BANDS.find(([lo, hi]) => earfcn >= lo && earfcn <= hi);
   return b ? `band ${b[2]}, ${b[3]} MHz` : "";
@@ -285,11 +323,15 @@ function updateActive() {
   active = cells.map((_, i) => i).filter((i) => i === 0 || !only || sameFreq[i]);
 }
 
-// typical spacing: median distance from each competing cell to its nearest neighbour
+// typical spacing: median distance from each cell to its nearest neighbour, among the cells
+// on this cell's own channel (with every frequency competing, other bands' sectors on the
+// same masts would make any place look dense); among all competing cells without a channel
 function typicalSpacing() {
-  const nn = active.slice(0, 300).map((i) => {
+  const sameChannel = cells.map((_, i) => i).filter((i) => i === 0 || sameFreq[i]);
+  const set = sameChannel.length >= 2 ? sameChannel : active;
+  const nn = set.slice(0, 300).map((i) => {
     let best = Infinity;
-    for (const j of active) {
+    for (const j of set) {
       if (j === i) continue;
       const d = Math.hypot(cx[i] - cx[j], cy[i] - cy[j]);
       if (d > 30 && d < best) best = d;
@@ -298,11 +340,32 @@ function typicalSpacing() {
   }).filter(Number.isFinite).sort((a, b) => a - b);
   return nn.length ? nn[Math.floor(nn.length / 2)] : 1000;
 }
+// extra path loss from each cell's frequency relative to this cell's (0 when either is
+// unknown), and the automatic max range with how it was chosen
+const frequencyLoss = new Float64Array(cells.length);
+let autoRange = 0, rangeBasis = "";
 function resetRange() {
   updateActive();
-  const auto = Math.min(MAX_RANGE_M, Math.max(MIN_RANGE_M, 4 * typicalSpacing()));
-  $("range").value = (auto / 1000).toFixed(1);
+  const spacing = typicalSpacing();
+  const environment = environmentOf(spacing);
+  // the simple model ignores frequency: no frequency loss, range from cell spacing
+  const targetMhz = $("propagation").value === "simple" ? NaN : downlinkMhz(t.earfcn);
+  cells.forEach((c, i) => {
+    const mhz = downlinkMhz(c.earfcn);
+    frequencyLoss[i] = Number.isNaN(targetMhz) || Number.isNaN(mhz)
+      ? 0 : hataLoss1kmDb(mhz, environment) - hataLoss1kmDb(targetMhz, environment);
+  });
+  if (Number.isNaN(targetMhz)) {
+    autoRange = Math.min(MAX_RANGE_M, Math.max(MIN_RANGE_M, 4 * spacing));
+    rangeBasis = "4× spacing";
+  } else {
+    autoRange = Math.min(MAX_RANGE_M, Math.max(500, hataRadiusM(targetMhz, environment)));
+    rangeBasis = `Hata, ${environment}`;
+  }
+  $("range").value = (autoRange / 1000).toFixed(1);
 }
+$("propagation").value = DATA.propagation === "simple" ? "simple" : "hata";
+$("propagation").addEventListener("change", () => { resetRange(); render(); });
 resetRange();
 
 function params() {
@@ -342,7 +405,7 @@ function evaluate(x, y, p) {
   for (const j of active) {
     const dx = x - cx[j], dy = y - cy[j];
     const d2 = dx * dx + dy * dy + k2 * acc[j] * acc[j] + 1;
-    P[j] = -0.5 * p.K * Math.log(d2);
+    P[j] = -0.5 * p.K * Math.log(d2) - frequencyLoss[j];
     if (p.directional && !Number.isNaN(azimuth[j])) P[j] += sectorGain(Math.atan2(dx, dy) - azimuth[j]);
     if (P[j] > P[best]) best = j;
     if (P[j] > max) max = P[j];
@@ -466,7 +529,8 @@ function updateText(p) {
   $("n-out").textContent = p.n.toFixed(1);
   $("sigma-out").textContent = p.sigma.toFixed(1);
   $("k-out").textContent = p.k.toFixed(2);
-  $("range-out").textContent = p.useReach ? `${(p.fade / 1000).toFixed(1)} (field 12)` : (p.range / 1000).toFixed(1);
+  $("range-out").textContent = p.useReach ? `${(p.fade / 1000).toFixed(1)} (field 12)`
+    : (p.range / 1000).toFixed(1) + (Math.abs(p.range - autoRange) < 60 ? ` (${rangeBasis})` : "");
   $("range").disabled = p.useReach;
   $("stat-area").textContent = (stats.area / 1e6).toFixed(2) + " km²";
   $("stat-cells").textContent = String(active.length - 1);
@@ -610,7 +674,8 @@ function showTooltip(point, lines) {
 // /cells/ (e.g. from a reverse proxy) is kept.
 const API_PATH = /^(.*)\/cells\/\d+\/\d+\/\d+\/\d+\/heatmap\/?$/.exec(location.pathname);
 const fromApi = /^https?:$/.test(location.protocol) && API_PATH !== null;
-const cellUrl = (c) => `${API_PATH[1]}/cells/${c.mcc}/${c.mnc}/${c.tac_id}/${c.cell_id}/heatmap`;
+const cellUrl = (c) => `${API_PATH[1]}/cells/${c.mcc}/${c.mnc}/${c.tac_id}/${c.cell_id}/heatmap` +
+  ($("propagation").value === "simple" ? "?propagation=simple" : "");
 
 // cells within 12 px of the pointer (a 24 px target around each dot)
 function cellsAt(point) {

@@ -177,11 +177,12 @@ The coverage is a model, not a measurement: signal falls off with distance, and 
 
 | Control | Default | Meaning |
 |---|---|---|
-| Path-loss exponent | 3.5 | how fast signal falls with distance: about 2 in open country, 3–4 in towns |
+| Path-loss exponent | 3.5 | how fast signal falls with distance: about 3.4–3.7 for masts of 50–15 m (Okumura–Hata's distance slope; see [below](#propagation-model-and-okumurahata)) |
 | Signal variation | 8 dB | random variation from buildings and terrain |
 | Accuracy weight | 0 | how much each cell's position is blurred by its accuracy |
-| Max range | 4× typical cell spacing, 1.5–60 km | where signal fades out; the map draws out to 3× this, so the gradual fade-out isn't cut off |
-| Only cells on this cell's frequency | on | the cell only competes with cells on its own EARFCN, because operators run several frequency layers over the same area; off when its EARFCN is unknown |
+| Max range | Okumura–Hata's radius for the cell's band and environment, 0.5–60 km | where signal fades out; the map draws out to 3× this, so the gradual fade-out isn't cut off. Shown with its basis, e.g. "1.3 (Hata, urban)"; without a known band, 4× the typical cell spacing |
+| Propagation model | Okumura–Hata | `Okumura–Hata (COST-231)`: lower frequencies carry further and the max range comes from Hata's radius (see [below](#propagation-model-and-okumurahata)); `Simple (distance only)`: every frequency is equal and the max range is 4× the cell spacing, the model before Hata was added |
+| Only cells on this cell's frequency | on | the cell only competes with cells on its own EARFCN, because operators run several frequency layers over the same area; off when its EARFCN is unknown. When off, lower-frequency cells carry further by Okumura–Hata's frequency term |
 | Contour lines | on | lines at 10, 25, 50, 75 and 90% likelihood, or every 5 dB in the signal view; the thicker 50% line is where the cell becomes the most likely server |
 | Antenna directions | off | experimental: sectors get a wedge-shaped antenna pattern pointing from their site's centre towards their position (a rough estimate); the orange line shows this cell's direction |
 | Field 12 | off | experimental: fade out at the cell's own reach from `unknown_12` instead of the shared max range |
@@ -199,11 +200,12 @@ The GeoJSON also contains the modelled coverage, calculated by wtfps with the sa
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--path-loss` | 3.5 | how fast signal falls with distance |
+| `--path-loss` | 3.5 | how fast signal falls with distance (about 3.4–3.7 for masts of 50–15 m) |
 | `--sigma-db` | 8 | random signal variation from buildings and terrain |
 | `--acc-weight` | 0 | how much each cell's position is blurred by its accuracy |
-| `--range-km` | 4× typical spacing, 1.5–60 km | distance at which signal fades out |
-| `--all-frequencies` | off | compete with cells on every frequency, not just the cell's own EARFCN |
+| `--range-km` | Okumura–Hata radius for the band and environment (or 4× spacing), 0.5–60 km | distance at which signal fades out; the summary's `range_basis` says how it was chosen |
+| `--propagation` | `hata` | `hata` (Okumura–Hata / COST-231) or `simple` (distance only, range 4× the cell spacing); recorded in the summary's `propagation` |
+| `--all-frequencies` | off | compete with cells on every frequency, not just the cell's own EARFCN, each weighted by Okumura–Hata's frequency term |
 | `--directional` | off | experimental: wedge-shaped antenna patterns; adds the cell's direction as a line (`role: "antenna"`) |
 | `--use-unknown-12` | off | experimental: fade out at the cell's own reach from field 12 instead of the shared range |
 | `--hex-res` | 10, coarser for large rural areas | H3 resolution of the hexagons (10: ~0.015 km², 11: ~0.002 km²); chosen automatically so a map has at most ~20,000 |
@@ -213,14 +215,30 @@ The GeoJSON also contains the modelled coverage, calculated by wtfps with the sa
 
 With `--contours`, the coverage is written as contour bands (`role: "contour"`) instead of hexagons: one MultiPolygon per band between two levels, with `likelihood_min`, `likelihood_max`, a `label` such as `"50–75%"`, and the same styling. Bands don't overlap: each is a ring around the next, so the area where the cell is the most likely server is the sum of the bands from 50% up. The files are smaller than with hexagons and look like the HTML map's heat, except that the bands start at the lowest level (10% by default) where the map fades down to 2%; add a lower level such as `0.02` to show that faint fringe.
 
+### Propagation model and Okumura–Hata
+
+A summary; [docs/propagation-models.md](docs/propagation-models.md) explains both models in detail: the formulas, every parameter, how the likelihood and the range are computed, a comparison on three cells, and the limits.
+
+The model follows the [Okumura–Hata](https://en.wikipedia.org/wiki/Hata_model) path-loss formula (COST-231 Hata above 1500 MHz), with a 30 m mast and the phone at 1.5 m:
+
+- **Distance**: Hata's path loss grows by 44.9 − 6.55·log₁₀(mast height) dB per tenfold distance: 35.2 dB for a 30 m mast, which is a path-loss exponent of 3.52. The default of 3.5 is that slope. Hata's suburban and rural corrections only subtract a constant, so the slope stays the same outside towns; an exponent of 2 (free space) only applies to short line-of-sight paths.
+- **Frequency**: each cell's downlink frequency comes from its EARFCN, and costs it Hata's frequency loss relative to the mapped cell: +1.3 dB at 900 MHz, +11 at 1800, +13 at 2100 and +16.5 at 2600 MHz compared with 800 MHz. With the default same-frequency competition this term is equal for all cells and cancels out; with every frequency competing it lets low-band cells carry further.
+- **Range**: by default, the distance at which Hata's path loss reaches 140 dB (a typical LTE link budget) at the cell's frequency, in an environment judged by how far apart cells on its own channel are: urban under 800 m, suburban under 2 km, rural beyond. For example 1.3 km for band 3 in a town, 16.6 km for band 20 in the countryside. Cells without a known EARFCN fall back to 4× the typical cell spacing.
+
+The simple model (`--propagation simple`, `?propagation=simple`, or the selector on the map) leaves out the frequency term and takes the range from 4× the cell spacing, as wtfps did before. In the default same-frequency competition both models give nearly the same core area; they differ in how far the faint fringe reaches and, with every frequency competing, in how much the low bands win.
+
+Hata was fitted for 150–1500 MHz (COST-231 to 2000 MHz), distances of 1–20 km and masts of 30–200 m; higher bands are extrapolated, and dense town cells a few hundred metres apart are outside its range, as they are outside the simple model's. Apple's field 12 (`unknown_12`) supports the frequency effect: relative to the spacing of their cells, 800 and 900 MHz cells reach 1.7–2× further than 1800 and 2100 MHz cells, where Hata predicts 1.6× (rural) to 2.1× (urban) for 800 against 1800 MHz.
+
 ### HTTP API
+
+The OpenAPI 3.1 specification is in [docs/openapi.yaml](docs/openapi.yaml); open it in any OpenAPI viewer (for example Swagger Editor or Redocly) for an interactive reference.
 
 ```
 GET /cells/{mcc}/{mnc}/{tac}/{cell}/heatmap                  HTML map
 GET /cells/{mcc}/{mnc}/{tac}/{cell}/heatmap?format=geojson   GeoJSON
 ```
 
-The same lookup as `heatmap`: the cell is looked up in the database; if it isn't crawled yet, it's fetched from Apple with its site's sibling sectors (five requests, about a second) and saved together with every other cell in the replies, then the map is drawn. Later requests for the same cell are served from the database (tens of milliseconds). The HTML map has all the controls above; the GeoJSON uses the default model settings and a 50 km radius. On an HTML map served by the API, clicking another cell opens that cell's map (the browser's Back button returns); on a map opened as a file, clicking does nothing.
+The same lookup as `heatmap`: the cell is looked up in the database; if it isn't crawled yet, it's fetched from Apple with its site's sibling sectors (five requests, about a second) and saved together with every other cell in the replies, then the map is drawn. Later requests for the same cell are served from the database (tens of milliseconds). The HTML map has all the controls above; the GeoJSON uses the default model settings and a 50 km radius. Add `propagation=simple` to use the simple propagation model instead of Okumura–Hata (`propagation=hata`, the default), for both formats; the HTML map then opens with that model selected, and keeps it when you click another cell. On an HTML map served by the API, clicking another cell opens that cell's map (the browser's Back button returns); on a map opened as a file, clicking does nothing.
 
 | Status | When |
 |---|---|

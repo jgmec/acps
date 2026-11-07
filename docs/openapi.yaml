@@ -1,0 +1,313 @@
+openapi: 3.1.0
+info:
+  title: wtfps HTTP API
+  version: 0.1.0
+  summary: Estimated coverage maps of LTE cells, from Apple's location service.
+  description: |
+    Started with `wtfps serve` (default `--listen 0.0.0.0:8090`) or the `api` service in
+    `docker-compose.yml` (port `WTFPS_API_PORT`, default 8090). No authentication.
+
+    A cell is looked up in the database. If it isn't crawled yet, wtfps asks Apple for it and
+    for its site's neighbouring sector numbers (five requests, about a second) and saves the cell
+    together with every other cell in the replies before drawing the map; later requests for the
+    same cell are served from the database. If the database can't be reached, the map is built
+    from Apple's replies without saving anything (`X-Wtfps-Source: online`).
+
+    The coverage model and the two propagation models are explained in
+    [docs/propagation-models.md](propagation-models.md).
+  license:
+    name: see LICENSE in the repository
+servers:
+  - url: http://localhost:8090
+    description: default `wtfps serve` / Docker Compose address
+tags:
+  - name: heatmap
+    description: coverage maps of a cell
+paths:
+  /cells/{mcc}/{mnc}/{tac}/{cell}/heatmap:
+    get:
+      tags: [heatmap]
+      operationId: getHeatmap
+      summary: Coverage map of a cell
+      description: |
+        Returns the cell's estimated coverage as an interactive HTML map (default) or as
+        GeoJSON. The HTML map has controls for every model setting, recalculated in the browser;
+        on a map served by this API, clicking another cell opens that cell's map (keeping the
+        chosen propagation model). The GeoJSON uses the default settings: same-frequency
+        competition, a 50 km radius (the 800 nearest cells), coverage as H3 hexagons.
+      parameters:
+        - name: mcc
+          in: path
+          required: true
+          description: Mobile country code.
+          schema: {type: integer, format: int32, minimum: 0}
+          example: 284
+        - name: mnc
+          in: path
+          required: true
+          description: Mobile network code (as a number, so `01` is `1`).
+          schema: {type: integer, format: int32, minimum: 0}
+          example: 5
+        - name: tac
+          in: path
+          required: true
+          description: Tracking area code. It must be correct; with a wrong TAC Apple reports the cell as not found.
+          schema: {type: integer, format: int32, minimum: 0}
+          example: 106
+        - name: cell
+          in: path
+          required: true
+          description: LTE cell ID (eNodeB ID × 256 + sector).
+          schema: {type: integer, format: int64, minimum: 0}
+          example: 451645
+        - name: format
+          in: query
+          required: false
+          description: Response format.
+          schema:
+            type: string
+            enum: [html, geojson]
+            default: html
+        - name: propagation
+          in: query
+          required: false
+          description: |
+            Propagation model (case-insensitive). `hata`: Okumura–Hata / COST-231, lower
+            frequencies carry further and the default range is Hata's radius for the cell's band
+            and environment. `simple`: distance only, every frequency equal, range 4× the typical
+            cell spacing. For HTML it sets the map's initial selection, which can be switched on
+            the page.
+          schema:
+            type: string
+            enum: [hata, simple]
+            default: hata
+      responses:
+        '200':
+          description: The map.
+          headers:
+            X-Wtfps-Source:
+              description: |
+                Where the cells came from: `database`; `fetched` (the cell wasn't crawled yet,
+                so it was fetched from Apple and saved); `online` (the database couldn't be
+                reached, so the map was built from Apple's replies and nothing was saved; the
+                HTML map's subtitle then says so, and the GeoJSON cell has `saved: false`).
+              schema:
+                type: string
+                enum: [database, fetched, online]
+          content:
+            text/html:
+              schema:
+                type: string
+                description: Self-contained HTML page (loads MapLibre, d3-contour and the OpenFreeMap basemap from the internet; the cell data is embedded).
+            application/geo+json:
+              schema:
+                $ref: '#/components/schemas/HeatmapGeoJSON'
+        '400':
+          description: An unknown `format` or `propagation`, or a path segment that isn't a number.
+          content:
+            text/plain:
+              schema: {type: string}
+              examples:
+                format:
+                  value: "unknown format \"pdf\": use html or geojson\n"
+                propagation:
+                  value: "unknown propagation \"cost231\": use hata or simple\n"
+                path:
+                  value: "Invalid URL: Cannot parse value at index 1 with value `x` to a `i32`"
+        '404':
+          description: |
+            The cell isn't in the database and Apple has no location for it. It's recorded in
+            `cell_not_found`; any neighbours Apple returned are still saved. The cell is asked
+            about again on every request, so a cell Apple learns about later is found.
+          content:
+            text/plain:
+              schema: {type: string}
+              example: "Apple has no location for cell 262/1/100/1000001 (recorded in cell_not_found)\n"
+        '500':
+          description: |
+            Apple couldn't be reached or kept failing after retries, or a database query failed.
+            (Being unable to reach the database at all doesn't give 500; see `X-Wtfps-Source: online`.)
+          content:
+            text/plain:
+              schema: {type: string}
+components:
+  schemas:
+    HeatmapGeoJSON:
+      type: object
+      description: |
+        GeoJSON FeatureCollection, drawn in order: coverage hexagons underneath, then the
+        accuracy circle, the nearby cells and the cell itself. Every feature has a `role`.
+        `fill` / `fill-opacity` / `stroke*` / `marker-*` properties follow the simplestyle
+        convention, which geojson.io and GitHub's map preview apply automatically.
+      required: [type, features]
+      properties:
+        type: {const: FeatureCollection}
+        features:
+          type: array
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/CellFeature'
+              - $ref: '#/components/schemas/NearbyFeature'
+              - $ref: '#/components/schemas/AccuracyFeature'
+              - $ref: '#/components/schemas/CoverageFeature'
+
+    Position:
+      type: array
+      description: '[longitude, latitude] in degrees (WGS84).'
+      prefixItems:
+        - {type: number, minimum: -180, maximum: 180}
+        - {type: number, minimum: -90, maximum: 90}
+      minItems: 2
+      maxItems: 2
+    Point:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type: {const: Point}
+        coordinates: {$ref: '#/components/schemas/Position'}
+    Polygon:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type: {const: Polygon}
+        coordinates:
+          type: array
+          description: Linear rings, the first one the outline; each ring is closed (first and last positions equal).
+          items:
+            type: array
+            minItems: 4
+            items: {$ref: '#/components/schemas/Position'}
+
+    CellBase:
+      type: object
+      description: Properties shared by the mapped cell and the nearby cells.
+      required: [role, mcc, mnc, tac_id, cell_id, site, sector, acc_m, earfcn, pci, unknown_12, crawled_at, azimuth_deg, marker-color, marker-size]
+      properties:
+        mcc: {type: integer}
+        mnc: {type: integer}
+        tac_id: {type: integer}
+        cell_id: {type: integer, format: int64}
+        site: {type: integer, description: 'eNodeB ID: `cell_id` ÷ 256.'}
+        sector: {type: integer, description: '`cell_id` mod 256.'}
+        acc_m: {type: [integer, 'null'], description: Apple's horizontal accuracy in metres (1414 is the smallest it reports for cells).}
+        earfcn: {type: [integer, 'null'], description: LTE channel; null when Apple didn't report it.}
+        pci: {type: [integer, 'null'], description: Physical cell ID; null when unknown.}
+        unknown_12:
+          type: [integer, 'null']
+          description: Apple's undocumented location field 12 in metres; behaves like the cell's reach.
+        crawled_at:
+          type: [string, 'null']
+          format: date-time
+          description: When the cell was last returned by Apple (UTC); null for cells crawled before this was recorded.
+        azimuth_deg:
+          type: [number, 'null']
+          description: Estimated antenna direction, degrees clockwise from north (a rough estimate from where the sector sits relative to its site's centre); null when it can't be estimated.
+        marker-color: {type: string}
+        marker-size: {type: string, enum: [small, medium]}
+
+    CellFeature:
+      type: object
+      description: The mapped cell, with the coverage summary.
+      required: [type, geometry, properties]
+      properties:
+        type: {const: Feature}
+        geometry: {$ref: '#/components/schemas/Point'}
+        properties:
+          allOf:
+            - $ref: '#/components/schemas/CellBase'
+            - type: object
+              required: [role, coverage, source, saved]
+              properties:
+                role: {const: cell}
+                coverage: {$ref: '#/components/schemas/CoverageSummary'}
+                source:
+                  type: string
+                  enum: [database, fetched, online]
+                  description: Same as the `X-Wtfps-Source` header.
+                saved: {type: boolean, description: False when the cells came from Apple without being saved.}
+
+    NearbyFeature:
+      type: object
+      description: Another cell of the same operator near the mapped cell (all frequencies).
+      required: [type, geometry, properties]
+      properties:
+        type: {const: Feature}
+        geometry: {$ref: '#/components/schemas/Point'}
+        properties:
+          allOf:
+            - $ref: '#/components/schemas/CellBase'
+            - type: object
+              required: [role, distance_m, bearing_deg, same_frequency]
+              properties:
+                role: {const: nearby}
+                distance_m: {type: number, description: Distance from the mapped cell in metres.}
+                bearing_deg: {type: [number, 'null'], description: Direction from the mapped cell, degrees clockwise from north.}
+                same_frequency:
+                  type: [boolean, 'null']
+                  description: Whether it's on the mapped cell's EARFCN; null when either EARFCN is unknown.
+
+    AccuracyFeature:
+      type: object
+      description: Circle of Apple's accuracy around the mapped cell (64-sided polygon).
+      required: [type, geometry, properties]
+      properties:
+        type: {const: Feature}
+        geometry: {$ref: '#/components/schemas/Polygon'}
+        properties:
+          type: object
+          required: [role, cell_id, radius_m]
+          properties:
+            role: {const: accuracy}
+            cell_id: {type: integer, format: int64}
+            radius_m: {type: integer}
+            stroke: {type: string}
+            stroke-width: {type: number}
+            stroke-opacity: {type: number}
+            fill-opacity: {type: number}
+
+    CoverageFeature:
+      type: object
+      description: An H3 hexagon where the mapped cell has at least a 1% chance of being the strongest of its operator.
+      required: [type, geometry, properties]
+      properties:
+        type: {const: Feature}
+        geometry: {$ref: '#/components/schemas/Polygon'}
+        properties:
+          type: object
+          required: [role, h3, likelihood, signal_db, most_likely_cell_id, most_likely_tac_id, most_likely_likelihood]
+          properties:
+            role: {const: coverage}
+            h3: {type: string, description: H3 cell index of the hexagon.}
+            likelihood: {type: number, minimum: 0, maximum: 1, description: Chance the mapped cell is the strongest at the hexagon's centre.}
+            signal_db: {type: number, description: The mapped cell's modelled signal above its fade-out level, in dB, ignoring other cells.}
+            most_likely_cell_id: {type: integer, format: int64, description: The most likely serving cell at the hexagon's centre.}
+            most_likely_tac_id: {type: integer}
+            most_likely_likelihood: {type: number, minimum: 0, maximum: 1}
+            fill: {type: string, description: Colour on the blue likelihood scale.}
+            fill-opacity: {type: number}
+            stroke-width: {type: number}
+            stroke-opacity: {type: number}
+
+    CoverageSummary:
+      type: object
+      description: The model settings used and the resulting coverage.
+      required: [area_km2, reach_m, competing_cells, same_frequency_only, range_m, range_basis, propagation, path_loss, sigma_db, acc_weight, hex_res]
+      properties:
+        area_km2: {type: number, description: Area where the cell is the most likely server (likelihood above 50%).}
+        reach_m: {type: number, description: Furthest point with a likelihood above 50%.}
+        competing_cells: {type: integer, description: Number of cells it competes with.}
+        same_frequency_only: {type: boolean, description: Whether only cells on its EARFCN compete (true by default when its EARFCN is known).}
+        range_m: {type: number, description: Distance at which signal fades out.}
+        range_basis:
+          type: string
+          description: How the range was chosen.
+          examples: ['Okumura-Hata, 1855 MHz, urban', '4x cell spacing', set]
+        propagation: {type: string, enum: [hata, simple]}
+        reach_from_unknown_12: {type: boolean, description: Whether the cell fades out at its field 12 reach (CLI option; false from the API).}
+        target_reach_m: {type: [number, 'null']}
+        directional: {type: boolean, description: Whether antenna directions were modelled (CLI option; false from the API).}
+        path_loss: {type: number, description: Path-loss exponent.}
+        sigma_db: {type: number, description: Random signal variation in dB.}
+        acc_weight: {type: number, description: How much positions are blurred by their accuracy.}
+        hex_res: {type: integer, minimum: 7, maximum: 12, description: H3 resolution of the coverage hexagons.}
+        contour_levels: {type: ['null', array], items: {type: number}, description: Contour band levels (CLI option; null from the API).}

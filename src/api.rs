@@ -1,7 +1,8 @@
 //! HTTP API. `GET /cells/{mcc}/{mnc}/{tac}/{cell}/heatmap` returns a cell's coverage map:
 //! the cell is looked up in the database; if it isn't crawled yet it's fetched from Apple
 //! and saved together with every other cell in the replies, then the map is drawn.
-//! HTML by default, GeoJSON with `?format=geojson`. When the database can't be reached the
+//! HTML by default, GeoJSON with `?format=geojson`; `?propagation=simple` switches from the
+//! default Okumura-Hata model to the distance-only one. When the database can't be reached the
 //! map is built from Apple's replies without saving; `X-Wtfps-Source` says which happened.
 
 use std::collections::HashMap;
@@ -18,6 +19,9 @@ use axum::{
 };
 use sqlx::PgPool;
 
+use clap::ValueEnum;
+
+use crate::coverage::Propagation;
 use crate::fetch::AppleWPSClient;
 use crate::lookup::{self, NotFound, Source};
 use crate::{default_model, heatmap_document, DEFAULT_RADIUS_KM};
@@ -60,6 +64,16 @@ async fn heatmap(
             return (StatusCode::BAD_REQUEST, message).into_response();
         }
     };
+    let mut model = default_model();
+    if let Some(name) = query.get("propagation") {
+        match Propagation::from_str(name, true) {
+            Ok(propagation) => model.propagation = propagation,
+            Err(_) => {
+                let message = format!("unknown propagation {name:?}: use hata or simple\n");
+                return (StatusCode::BAD_REQUEST, message).into_response();
+            }
+        }
+    }
 
     let pool = match state.schema_ready.load(Ordering::Relaxed) {
         true => Ok(&state.pool),
@@ -74,7 +88,7 @@ async fn heatmap(
         info!("cell {key:?} wasn't crawled yet: fetched it from Apple and saved {found} cells");
     }
 
-    match heatmap_document(key, rows, geojson.then(default_model), &source) {
+    match heatmap_document(key, rows, &model, geojson, &source) {
         Ok((document, _)) => {
             let content_type = if geojson { "application/geo+json" } else { "text/html; charset=utf-8" };
             // database, fetched (from Apple and saved) or online (from Apple, not saved)

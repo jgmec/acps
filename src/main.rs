@@ -102,7 +102,7 @@ enum Command {
 /// Coverage model settings for `heatmap --geojson`; the HTML map has sliders for these
 #[derive(clap::Args, Debug, Clone)]
 struct ModelArgs {
-    /// path-loss exponent: about 2 in open country, 3-4 in towns
+    /// path-loss exponent: about 3.4-3.7 for masts of 50-15 m (Okumura-Hata's distance slope)
     #[arg(long, default_value_t = 3.5)]
     path_loss: f64,
     /// random signal variation from buildings and terrain, in dB
@@ -111,7 +111,8 @@ struct ModelArgs {
     /// how much each cell's position is blurred by its accuracy (0 = exact)
     #[arg(long, default_value_t = 0.0)]
     acc_weight: f64,
-    /// distance at which signal fades out [default: 4x the typical spacing of competing cells]
+    /// distance at which signal fades out [default: Okumura-Hata's radius for the cell's band
+    /// and environment, or 4x the typical spacing of competing cells without a known band]
     #[arg(long)]
     range_km: Option<f64>,
     /// compete with cells on all frequencies, not just the cell's own EARFCN
@@ -125,6 +126,10 @@ struct ModelArgs {
     /// [default: 10, coarser for large rural areas]
     #[arg(long, value_parser = clap::value_parser!(u8).range(7..=12))]
     hex_res: Option<u8>,
+    /// how signal depends on frequency and how far a cell reaches by default: hata
+    /// (Okumura-Hata / COST-231) or simple (distance only, range 4x the cell spacing)
+    #[arg(long, value_enum, default_value_t = coverage::Propagation::Hata)]
+    propagation: coverage::Propagation,
     /// experimental: give sectors a wedge-shaped antenna pattern, pointing the way their
     /// position is offset from their site's centre (a rough estimate)
     #[arg(long)]
@@ -260,7 +265,7 @@ async fn main() -> Result<()> {
             let extension = if geojson { "geojson" } else { "html" };
             let path =
                 out.unwrap_or_else(|| format!("cell-{mcc}-{mnc}-{tac_id}-{cell_id}.{extension}"));
-            let (document, neighbours) = heatmap_document(key, rows, geojson.then_some(model), &source)?;
+            let (document, neighbours) = heatmap_document(key, rows, &model, geojson, &source)?;
             std::fs::write(&path, document)?;
             println!("wrote {path} ({neighbours} nearby cells)");
         }
@@ -455,14 +460,7 @@ fn cell_key(cell: &CellTower) -> CellKey {
 /// LTE band and its nominal frequency in MHz for a downlink EARFCN (3GPP TS 36.101);
 /// same table as the HTML map's
 fn lte_band(earfcn: i32) -> Option<(u32, u32)> {
-    const BANDS: [(i32, i32, u32, u32); 15] = [
-        (0, 599, 1, 2100), (600, 1199, 2, 1900), (1200, 1949, 3, 1800), (1950, 2399, 4, 1700),
-        (2400, 2649, 5, 850), (2750, 3449, 7, 2600), (3450, 3799, 8, 900), (5010, 5179, 12, 700),
-        (5180, 5279, 13, 700), (6150, 6449, 20, 800), (9210, 9659, 28, 700),
-        (37750, 38249, 38, 2600), (38650, 39649, 40, 2300), (39650, 41589, 41, 2500),
-        (41590, 43589, 42, 3500),
-    ];
-    BANDS.iter().find(|b| (b.0..=b.1).contains(&earfcn)).map(|b| (b.2, b.3))
+    coverage::LTE_BANDS.iter().find(|b| (b.0..=b.1).contains(&earfcn)).map(|b| (b.2, b.3))
 }
 
 /// EARFCN / PCI as reported by Apple; u32::MAX (-1) means unknown
@@ -1139,7 +1137,8 @@ async fn nearby_from_db(pool: &PgPool, key: CellKey, radius_km: f64) -> Result<V
 fn heatmap_document(
     key: CellKey,
     mut rows: Vec<NearbyCell>,
-    geojson: Option<ModelArgs>,
+    model: &ModelArgs,
+    geojson: bool,
     source: &lookup::Source,
 ) -> Result<(String, usize)> {
     let (mcc, mnc, tac_id, cell_id) = key;
@@ -1164,9 +1163,9 @@ fn heatmap_document(
     };
     let nearby: Vec<&NearbyCell> = rows.iter().filter(|c| !is_target(c)).collect();
 
-    if let Some(model) = geojson {
+    if geojson {
         let accuracy = target.acc.filter(|&a| a > 0).map(|a| accuracy_circle(target.lat, target.lon, a as f64));
-        let coverage = model_coverage(target, &nearby, &model)?;
+        let coverage = model_coverage(target, &nearby, model)?;
         let mut geojson = cell_geojson(mcc, mnc, target, &nearby, accuracy, &coverage)?;
         // where the data came from, and whether it was saved
         if let Some(cell) = geojson["features"]
@@ -1184,6 +1183,8 @@ fn heatmap_document(
         "cells": nearby.iter().map(|c| cell_json(c)).collect::<Vec<_>>(),
         "generated": target.generated,
         "note": source.note(),
+        // the map's initial propagation model; it can be switched on the page
+        "propagation": model.propagation.name(),
     });
 
     // the JSON goes inside a <script> element
@@ -1249,6 +1250,8 @@ fn cell_geojson(
         "competing_cells": coverage.competitors.len() - 1,
         "same_frequency_only": coverage.same_frequency_only,
         "range_m": coverage.result.range_m.round(),
+        "range_basis": coverage.result.range_basis,
+        "propagation": m.propagation.name(),
         "reach_from_unknown_12": m.use_unknown_12,
         "directional": m.directional,
         "target_reach_m": coverage.result.target_reach_m.map(f64::round),
@@ -1419,6 +1422,7 @@ fn model_coverage<'a>(
             acc: c.acc,
             reach: c.unknown_12,
             azimuth_deg: c.azimuth_deg,
+            earfcn: c.earfcn,
         })
         .collect();
     let params = coverage::Params {
@@ -1428,6 +1432,7 @@ fn model_coverage<'a>(
         range_m: model.range_km.map(|km| km * 1000.0),
         use_reach: model.use_unknown_12,
         directional: model.directional,
+        propagation: model.propagation,
         resolution: model.hex_res.map(Resolution::try_from).transpose()?,
     };
     let levels = &model.contour_levels;

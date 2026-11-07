@@ -31,7 +31,7 @@ Sector 11 of site 120638, by the beach. There are no competing cells out at sea,
 
 Apple's replies include an undocumented location field (field 12, stored as `unknown_12`). Across 3,000 crawled cells it grows with the spacing between cells, from a median of about 1.9 km where same-frequency cells are under 385 m apart to 6.4 km where they're over 1.4 km apart, so it behaves like each cell's reach. Its meaning is a guess.
 
-By default the model fades every cell out at one shared maximum range (4× the typical cell spacing). The experimental option (the checkbox on the map, or `--use-unknown-12` with `--geojson`) fades the cell out at its own field 12 reach instead:
+By default the model fades every cell out at one shared maximum range (at the time these figures were made 4× the typical cell spacing; now Okumura–Hata's radius for the cell's band, which only changes the faint outer fringe). The experimental option (the checkbox on the map, or `--use-unknown-12` with `--geojson`) fades the cell out at its own field 12 reach instead:
 
 | Cell | Fades out at | Area where most likely server | Furthest point above 50% |
 |---|---|---|---|
