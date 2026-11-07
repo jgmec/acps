@@ -58,6 +58,8 @@ By default each cell's coverage is round. With "Antenna directions" ticked on th
 
 The Kon Tum site shows the idea working: its three band-3 sectors come out at 102°, 222° and 336°, almost exactly 120° apart, and the band-1 sector sharing sector 3's PCI gets the same 336°. Across 16,894 crawled three-sector sites the estimate is much rougher: half have their three directions within 150° of evenly spread, against 29% for random positions treated the same way, so there is a real signal but plenty of noise. That's why it's off by default.
 
+For slides, [`antenna/`](antenna/README.md) has 16:9 images of three cells in every mode (propagation model × frequency mode × round or antenna directions), with an overview per cell.
+
 ## Contour lines on the HTML map
 
 ![Contour lines on the HTML maps](contour-lines.png)
