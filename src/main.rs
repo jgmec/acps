@@ -245,37 +245,33 @@ async fn main() -> Result<()> {
 
         Command::Heatmap { mcc, mnc, tac_id, cell_id, radius_km, geojson, model, out, online, no_fetch } => {
             let key = (mcc, mnc, tac_id, cell_id);
-            let rows = if online {
-                let results = lookup::fetch_with_siblings(&client, key).await?;
-                let rows = lookup::nearby_from_replies(key, radius_km, HEATMAP_MAX_CELLS as usize, results)?;
-                println!("fetched {} cells of this operator from Apple (not saved)", rows.len());
-                rows
-            } else {
-                let pool = PgPoolOptions::new()
-                    .max_connections(1)
-                    .connect(&database_url()?)
-                    .await?;
-                let (rows, source) = lookup::nearby_or_fetch(&client, &pool, key, radius_km, !no_fetch).await?;
-                if let lookup::Source::Fetched(found) = source {
-                    println!("cell wasn't crawled yet: fetched it from Apple and saved {found} cells");
+            let pool = if online { None } else { Some(lazy_pool(1)?) };
+            let pool = pool.as_ref().ok_or("database not used");
+            let (rows, source) = lookup::heatmap_rows(&client, pool, key, radius_km, !no_fetch).await?;
+            match &source {
+                lookup::Source::Database => {}
+                lookup::Source::Fetched(found) => {
+                    println!("cell wasn't crawled yet: fetched it from Apple and saved {found} cells")
                 }
-                rows
-            };
+                lookup::Source::Online(reason) => {
+                    println!("fetched {} cells of this operator from Apple; not saved ({reason})", rows.len())
+                }
+            }
             let extension = if geojson { "geojson" } else { "html" };
             let path =
                 out.unwrap_or_else(|| format!("cell-{mcc}-{mnc}-{tac_id}-{cell_id}.{extension}"));
-            let (document, neighbours) = heatmap_document(key, rows, geojson.then_some(model))?;
+            let (document, neighbours) = heatmap_document(key, rows, geojson.then_some(model), &source)?;
             std::fs::write(&path, document)?;
             println!("wrote {path} ({neighbours} nearby cells)");
         }
 
         Command::Serve { listen } => {
-            let pool = PgPoolOptions::new()
-                .max_connections(CONCURRENT_PARTS as _)
-                .connect(&database_url()?)
-                .await?;
-            sqlx::migrate!().run(&pool).await?;
-            api::serve(client, pool, &listen).await?;
+            // starts even when the database is down: requests then fall back to Apple, and
+            // the schema is brought up to date once it can be reached
+            let pool = lazy_pool(CONCURRENT_PARTS as u32)?;
+            let schema_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            tokio::spawn(migrate_when_reachable(pool.clone(), schema_ready.clone()));
+            api::serve(client, pool, schema_ready, &listen).await?;
         }
 
         Command::Migrate => {
@@ -1048,6 +1044,36 @@ const HEATMAP_TEMPLATE: &str = include_str!("heatmap.html");
 /// tens of km, still see their competitors)
 const DEFAULT_RADIUS_KM: f64 = 50.0;
 
+/// How long to wait for a database connection before treating it as unreachable.
+const DB_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A pool that connects on first use, so a database outage doesn't stop the command or
+/// server from starting; each use waits at most DB_CONNECT_TIMEOUT for a connection.
+fn lazy_pool(max_connections: u32) -> Result<PgPool> {
+    Ok(PgPoolOptions::new()
+        .max_connections(max_connections)
+        .acquire_timeout(DB_CONNECT_TIMEOUT)
+        .connect_lazy(&database_url()?)?)
+}
+
+/// Apply pending migrations, retrying every 10 s until the database can be reached, then
+/// set `ready`. Until then the API treats the database as unavailable: on a new database the
+/// tables don't exist yet.
+async fn migrate_when_reachable(pool: PgPool, ready: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    loop {
+        match sqlx::migrate!().run(&pool).await {
+            Ok(()) => {
+                ready.store(true, std::sync::atomic::Ordering::Relaxed);
+                return info!("database schema is up to date");
+            }
+            Err(e) => {
+                warn!("can't apply migrations yet ({e}); retrying in 10 s");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        }
+    }
+}
+
 /// The coverage model's default settings (as with no command-line options).
 fn default_model() -> ModelArgs {
     #[derive(Parser)]
@@ -1114,6 +1140,7 @@ fn heatmap_document(
     key: CellKey,
     mut rows: Vec<NearbyCell>,
     geojson: Option<ModelArgs>,
+    source: &lookup::Source,
 ) -> Result<(String, usize)> {
     let (mcc, mnc, tac_id, cell_id) = key;
 
@@ -1140,7 +1167,15 @@ fn heatmap_document(
     if let Some(model) = geojson {
         let accuracy = target.acc.filter(|&a| a > 0).map(|a| accuracy_circle(target.lat, target.lon, a as f64));
         let coverage = model_coverage(target, &nearby, &model)?;
-        let geojson = cell_geojson(mcc, mnc, target, &nearby, accuracy, &coverage)?;
+        let mut geojson = cell_geojson(mcc, mnc, target, &nearby, accuracy, &coverage)?;
+        // where the data came from, and whether it was saved
+        if let Some(cell) = geojson["features"]
+            .as_array_mut()
+            .and_then(|f| f.iter_mut().find(|f| f["properties"]["role"] == "cell"))
+        {
+            cell["properties"]["source"] = json!(source.name());
+            cell["properties"]["saved"] = json!(source.saved());
+        }
         return Ok((geojson.to_string(), nearby.len()));
     }
 
@@ -1148,6 +1183,7 @@ fn heatmap_document(
         "target": cell_json(target),
         "cells": nearby.iter().map(|c| cell_json(c)).collect::<Vec<_>>(),
         "generated": target.generated,
+        "note": source.note(),
     });
 
     // the JSON goes inside a <script> element

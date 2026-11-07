@@ -665,7 +665,9 @@ map.getContainer().addEventListener("mouseleave", () => { tooltip.style.display 
 $("title").textContent = `Estimated coverage of cell ${t.cell_id}`;
 $("subtitle").textContent = `MCC ${t.mcc} · MNC ${t.mnc} · TAC ${t.tac_id} · site ${site(t.cell_id)}, sector ${sector(t.cell_id)} · ` +
   `${radioLabel(t)} · ` +
-  `${t.lat.toFixed(5)}, ${t.lon.toFixed(5)} · data from ${DATA.generated}`;
+  `${t.lat.toFixed(5)}, ${t.lon.toFixed(5)} · data from ${DATA.generated}` +
+  // set when the cells came from Apple without being saved (database unavailable)
+  (DATA.note ? ` · ${DATA.note}` : "");
 $("stat-acc").textContent = t.acc != null ? Math.round(t.acc) + " m" : "unknown";
 
 const tbody = $("table-body");

@@ -8,7 +8,10 @@ use sqlx::PgPool;
 
 use crate::fetch::{AppleWPSClient, Location};
 use crate::protobuf::CellTower;
-use crate::{cell_key, commit_cells, merge_found, nearby_from_db, query_cells, CellKey, NearbyCell};
+use crate::{
+    cell_key, commit_cells, merge_found, nearby_from_db, query_cells, CellKey, NearbyCell,
+    HEATMAP_MAX_CELLS,
+};
 
 /// Sector numbers tried around the cell's own on its site. Apple's reply for a cell often
 /// lacks its own site's other sectors, which antenna directions need; operators number a
@@ -68,6 +71,65 @@ pub enum Source {
     Database,
     /// fetched from Apple and saved; the number of cells with a location in the replies
     Fetched(usize),
+    /// straight from Apple's replies, nothing saved; why the database wasn't used
+    Online(&'static str),
+}
+
+impl Source {
+    /// for the X-Wtfps-Source header and the GeoJSON `source` property
+    pub fn name(&self) -> &'static str {
+        match self {
+            Source::Database => "database",
+            Source::Fetched(_) => "fetched",
+            Source::Online(_) => "online",
+        }
+    }
+
+    pub fn saved(&self) -> bool {
+        !matches!(self, Source::Online(_))
+    }
+
+    /// shown on the map when its cells weren't saved
+    pub fn note(&self) -> Option<String> {
+        match self {
+            Source::Online(reason) => Some(format!("from Apple, not saved: {reason}")),
+            _ => None,
+        }
+    }
+}
+
+/// The heatmap input for `key`: from the database, fetching and saving the cell if it isn't
+/// crawled yet (see `nearby_or_fetch`). Without a database (`pool` is an error saying why
+/// not), or when it can't be reached, straight from Apple's replies, saving nothing.
+pub async fn heatmap_rows(
+    client: &AppleWPSClient,
+    pool: std::result::Result<&PgPool, &'static str>,
+    key: CellKey,
+    radius_km: f64,
+    fetch: bool,
+) -> Result<(Vec<NearbyCell>, Source)> {
+    let reason = match pool {
+        Err(reason) => reason,
+        Ok(pool) => match nearby_or_fetch(client, pool, key, radius_km, fetch).await {
+            Err(e) if fetch && database_unreachable(&e) => {
+                warn!("database unreachable ({e:#}): answering from Apple without saving");
+                "database unavailable"
+            }
+            other => return other,
+        },
+    };
+    let results = fetch_with_siblings(client, key).await?;
+    let rows = nearby_from_replies(key, radius_km, HEATMAP_MAX_CELLS as usize, results)?;
+    Ok((rows, Source::Online(reason)))
+}
+
+/// Whether a database error means it couldn't be reached at all (down, refused, timed
+/// out), as opposed to a problem with a query, which shouldn't be hidden by a fallback.
+fn database_unreachable(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<sqlx::Error>(),
+        Some(sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_) | sqlx::Error::Tls(_))
+    )
 }
 
 /// The cell and its nearby cells from the database. If the cell isn't crawled yet and

@@ -1,9 +1,12 @@
 //! HTTP API. `GET /cells/{mcc}/{mnc}/{tac}/{cell}/heatmap` returns a cell's coverage map:
 //! the cell is looked up in the database; if it isn't crawled yet it's fetched from Apple
 //! and saved together with every other cell in the replies, then the map is drawn.
-//! HTML by default, GeoJSON with `?format=geojson`.
+//! HTML by default, GeoJSON with `?format=geojson`. When the database can't be reached the
+//! map is built from Apple's replies without saving; `X-Wtfps-Source` says which happened.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
@@ -19,16 +22,25 @@ use crate::fetch::AppleWPSClient;
 use crate::lookup::{self, NotFound, Source};
 use crate::{default_model, heatmap_document, DEFAULT_RADIUS_KM};
 
+const SOURCE_HEADER: header::HeaderName = header::HeaderName::from_static("x-wtfps-source");
+
 #[derive(Clone)]
 struct AppState {
     client: AppleWPSClient,
     pool: PgPool,
+    /// set once migrations have run; until then the database counts as unavailable
+    schema_ready: Arc<AtomicBool>,
 }
 
-pub async fn serve(client: AppleWPSClient, pool: PgPool, listen: &str) -> Result<()> {
+pub async fn serve(
+    client: AppleWPSClient,
+    pool: PgPool,
+    schema_ready: Arc<AtomicBool>,
+    listen: &str,
+) -> Result<()> {
     let app = Router::new()
         .route("/cells/{mcc}/{mnc}/{tac}/{cell}/heatmap", get(heatmap))
-        .with_state(AppState { client, pool });
+        .with_state(AppState { client, pool, schema_ready });
     let listener = tokio::net::TcpListener::bind(listen).await?;
     info!("listening on http://{}", listener.local_addr()?);
     axum::serve(listener, app).await?;
@@ -49,20 +61,25 @@ async fn heatmap(
         }
     };
 
-    let rows = match lookup::nearby_or_fetch(&state.client, &state.pool, key, DEFAULT_RADIUS_KM, true).await {
-        Ok((rows, source)) => {
-            if let Source::Fetched(found) = source {
-                info!("cell {key:?} wasn't crawled yet: fetched it from Apple and saved {found} cells");
-            }
-            rows
-        }
-        Err(e) => return error_response(e),
+    let pool = match state.schema_ready.load(Ordering::Relaxed) {
+        true => Ok(&state.pool),
+        false => Err("database unavailable"),
     };
+    let (rows, source) =
+        match lookup::heatmap_rows(&state.client, pool, key, DEFAULT_RADIUS_KM, true).await {
+            Ok(found) => found,
+            Err(e) => return error_response(e),
+        };
+    if let Source::Fetched(found) = source {
+        info!("cell {key:?} wasn't crawled yet: fetched it from Apple and saved {found} cells");
+    }
 
-    match heatmap_document(key, rows, geojson.then(default_model)) {
+    match heatmap_document(key, rows, geojson.then(default_model), &source) {
         Ok((document, _)) => {
             let content_type = if geojson { "application/geo+json" } else { "text/html; charset=utf-8" };
-            ([(header::CONTENT_TYPE, content_type)], document).into_response()
+            // database, fetched (from Apple and saved) or online (from Apple, not saved)
+            let headers = [(header::CONTENT_TYPE, content_type), (SOURCE_HEADER, source.name())];
+            (headers, document).into_response()
         }
         Err(e) => error_response(e),
     }

@@ -163,7 +163,7 @@ The saved cells' areas are queued for the crawler, so a later `explore cell` con
 
 | Option | Meaning |
 |---|---|
-| `--online` | build the map from Apple's replies only, without a database: nothing is read or saved, and `DATABASE_URL` isn't needed. The map only has the cells from those five replies (one group of ~100 around the cell), so it's thinner near the group's edge than a crawled area. |
+| `--online` | build the map from Apple's replies only, without a database: nothing is read or saved. The map only has the cells from those five replies (one group of ~100 around the cell), so it's thinner near the group's edge than a crawled area. |
 | `--no-fetch` | only use the database: fail instead of asking Apple for a cell that isn't crawled |
 | `--radius-km` | include the operator's cells within this distance (default 50; at most the 800 nearest, so towns use a few km and rural cells, which reach tens of km, still see their competitors) |
 | `--out` | output file (default `cell-<mcc>-<mnc>-<tac>-<cell>.html`, or `.geojson`) |
@@ -224,12 +224,20 @@ The same lookup as `heatmap`: the cell is looked up in the database; if it isn't
 
 | Status | When |
 |---|---|
-| `200` | the map: `text/html`, or `application/geo+json` |
+| `200` | the map: `text/html`, or `application/geo+json`. The `X-Wtfps-Source` header says where it came from: `database`, `fetched` (from Apple and saved) or `online` (from Apple, not saved: see below) |
 | `400` | an unknown `format`, or a cell number that isn't a number |
 | `404` | the cell isn't in the database and Apple has no location for it; it's recorded in `cell_not_found` (any neighbours Apple returned are still saved). The message says so, e.g. `Apple has no location for cell 262/1/100/1000001 (recorded in cell_not_found)`. |
-| `500` | Apple couldn't be reached or kept failing after retries, or the database failed; the message has the error |
+| `500` | Apple couldn't be reached or kept failing after retries, or a database query failed; the message has the error |
 
 A cell that got a `404` is asked about again on every request, so a cell Apple learns about later is found.
+
+#### Without a database
+
+If the database can't be reached (down, refusing connections, or no connection within 2 seconds), the API doesn't fail: it builds the map from Apple's replies (the cell and its sibling sectors) and saves nothing. The response then has `X-Wtfps-Source: online`, the HTML map's subtitle ends with "from Apple, not saved: database unavailable", and the GeoJSON cell has `"source": "online"` and `"saved": false`. Each fallback is logged as a warning. The map is thinner than one from a crawled area: it only has the ~100 cells in those replies.
+
+The server also starts while the database is down, and applies migrations in the background, retrying every 10 seconds; until they have run (on a new database the tables don't exist yet) requests are answered from Apple the same way. Once the database is back, requests use it and save again, without a restart. Only being unable to reach the database triggers the fallback: a failing query still gives `500`, so real problems aren't hidden.
+
+`wtfps heatmap` does the same, printing `not saved (database unavailable)`; with `--no-fetch` it fails instead. The crawlers (`explore`) always need the database.
 
 ```sh
 curl -o map.html http://localhost:8090/cells/284/5/106/451645/heatmap
@@ -240,7 +248,7 @@ Run it with Docker Compose (see [below](#the-http-api-in-docker)), or directly w
 
 ### `migrate`
 
-`explore` and `serve` apply pending database migrations when they start. To update the schema without crawling, run `wtfps migrate`.
+`explore` applies pending database migrations when it starts, and `serve` in the background (retrying until the database can be reached). To update the schema without crawling, run `wtfps migrate`.
 
 ## Running with Docker Compose
 
@@ -357,6 +365,17 @@ docker compose exec db psql -U postgres -d wtfps -c "select count(*) from cell"
 ```
 
 Keep `wtfps.dump` until you've checked the restored data.
+
+## Limits: LTE only
+
+The cell features assume LTE. All cells Apple has returned so far look like LTE, but its replies don't say which radio technology a cell uses, and the database has no column for it. Cells without an EARFCN or PCI, such as 3G cells imported from elsewhere, would work only partly:
+
+- **Lookup** works: cells in the database are served from it. A missing cell is asked of Apple, which doesn't seem to know 3G cells, so the answer is `404`.
+- **Frequency filter**: with no EARFCN it's off, so the cell competes with every cell of its operator, all channels mixed; with several carriers that makes its area too small. Band names are empty.
+- **Antenna directions and crawler probing** are wrong for 3G: both take the site as `cell_id / 256`, the LTE numbering. A 3G cell ID is the radio network controller × 65,536 plus a local cell ID whose sector numbering is up to the operator.
+- **Channel numbers overlap between technologies.** Bands are named from the LTE table, but some 3G channel numbers fall in the same ranges: 2950, reported for MNC 1 cells in Bulgaria, is LTE band 7 (2600 MHz) or 3G band 8 (900 MHz). A cell labelled "band 7" with a number between 2937 and 3088 may be 3G.
+
+Positions, accuracy, the coverage model and contours work the same for any cell.
 
 ## Development
 
