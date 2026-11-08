@@ -9,25 +9,25 @@ use tryhard::retry_fn;
 
 use crate::protobuf::{AppleWLoc, CellTower, WifiDevice};
 
+/// Apple's location service, and its server for China (`--china`).
+const APPLE_URL: &str = "https://gs-loc.apple.com/clls/wloc";
+const APPLE_CHINA_URL: &str = "https://gs-loc-cn.apple.com/clls/wloc";
+
 #[derive(Clone)]
 pub struct AppleWPSClient {
     client: reqwest::Client,
-    china: bool,
+    url: String,
 }
 
 impl AppleWPSClient {
+    /// Apple's server, or with `china` its server for China; WTFPS_APPLE_URL and
+    /// WTFPS_APPLE_CHINA_URL (environment or .env) replace them, e.g. for a proxy.
     pub fn new(china: bool) -> Self {
+        let (variable, default) =
+            if china { ("WTFPS_APPLE_CHINA_URL", APPLE_CHINA_URL) } else { ("WTFPS_APPLE_URL", APPLE_URL) };
         Self {
             client: reqwest::Client::new(),
-            china,
-        }
-    }
-
-    fn url(&self) -> &str {
-        if self.china {
-            "https://gs-loc-cn.apple.com/clls/wloc"
-        } else {
-            "https://gs-loc.apple.com/clls/wloc"
+            url: dotenvy::var(variable).ok().filter(|u| !u.is_empty()).unwrap_or_else(|| default.into()),
         }
     }
 
@@ -58,7 +58,7 @@ impl AppleWPSClient {
             let payload = payload.clone();
             let req = self
                 .client
-                .post(self.url())
+                .post(&self.url)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .header("accept", "*/*")
                 .header("accept-charset", "utf-8")

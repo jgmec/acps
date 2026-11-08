@@ -328,7 +328,17 @@ docker compose up -d --build api
 curl -o map.html http://localhost:8090/cells/284/5/106/451645/heatmap
 ```
 
-The `api` service starts once `db` is healthy and connects to it over Docker's internal network. Set `WTFPS_API_PORT` in `.env` to use another port. The image is built from the `Dockerfile` with the official `rust` and `debian` images only; Cargo's downloads and build output are kept in BuildKit cache mounts, so the first build takes about 2.5 minutes and later builds after a source change about 25 seconds. `docker builder prune` clears that cache (it has nothing to do with the database volume).
+The `api` service starts once `db` is healthy and connects to it over Docker's internal network. Set `WTFPS_API_PORT` in `.env` to use another port.
+
+The external services wtfps calls can be changed in `.env` (compose passes them to the `api` service), for example to go through a proxy or use a mirror. They work the same for the command line.
+
+| Variable | Default | Used for |
+|---|---|---|
+| `WTFPS_APPLE_URL` | `https://gs-loc.apple.com/clls/wloc` | Apple's location service |
+| `WTFPS_APPLE_CHINA_URL` | `https://gs-loc-cn.apple.com/clls/wloc` | Apple's server for China (`--china`) |
+| `WTFPS_DEM_URL` | `https://copernicus-dem-30m.s3.amazonaws.com` | elevation tiles for terrain; a mirror needs the same `{name}/{name}.tif` layout |
+
+The image is built from the `Dockerfile` with the official `rust` and `debian` images only; Cargo's downloads and build output are kept in BuildKit cache mounts, so the first build takes about 2.5 minutes and later builds after a source change about 25 seconds. `docker builder prune` clears that cache (it has nothing to do with the database volume).
 
 ### Reading cell coordinates
 

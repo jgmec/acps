@@ -25,7 +25,14 @@ const PHONE_M: f64 = 1.5;
 const EARTH_RADIUS_M: f64 = 6_371_000.0 * 4.0 / 3.0;
 /// radial lines per cell (every 0.5°)
 const RAYS: usize = 720;
+/// Copernicus GLO-30 tiles on AWS Open Data; WTFPS_DEM_URL (environment or .env) replaces
+/// it, e.g. with a mirror holding the same `{name}/{name}.tif` layout
 const TILE_URL: &str = "https://copernicus-dem-30m.s3.amazonaws.com";
+
+fn tile_url() -> String {
+    let url = dotenvy::var("WTFPS_DEM_URL").ok().filter(|u| !u.is_empty());
+    url.unwrap_or_else(|| TILE_URL.into()).trim_end_matches('/').to_string()
+}
 
 /// A rectangle of elevation in whole metres, rows from north to south.
 struct Grid {
@@ -107,7 +114,7 @@ async fn tile_file(client: &reqwest::Client, dir: &Path, lat: i32, lon: i32) -> 
     if missing.exists() {
         return Ok(None);
     }
-    let url = format!("{TILE_URL}/{name}/{name}.tif");
+    let url = format!("{}/{name}/{name}.tif", tile_url());
     info!("downloading elevation tile {name} (about 30-50 MB)");
     let response = client.get(&url).send().await.with_context(|| format!("downloading {url}"))?;
     match response.status().as_u16() {

@@ -47,6 +47,11 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       # elevation tiles for ?terrain=true, downloaded on first use (~40 MB per 1° square)
       WTFPS_DEM_DIR: /dem
+      # external services: Apple's location service (and its server for China, used with
+      # --china) and the Copernicus elevation tiles; change them e.g. for a proxy or mirror
+      WTFPS_APPLE_URL: ${WTFPS_APPLE_URL:-https://gs-loc.apple.com/clls/wloc}
+      WTFPS_APPLE_CHINA_URL: ${WTFPS_APPLE_CHINA_URL:-https://gs-loc-cn.apple.com/clls/wloc}
+      WTFPS_DEM_URL: ${WTFPS_DEM_URL:-https://copernicus-dem-30m.s3.amazonaws.com}
     volumes:
       - dem:/dem
     ports:
