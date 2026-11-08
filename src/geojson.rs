@@ -206,3 +206,37 @@ pub(crate) fn heat_opacity(value: f64) -> f64 {
     let opacity = if value < 0.1 { 2.65 * value } else { (0.2 + 0.65 * value.min(1.0)).min(0.8) };
     (opacity * 100.0).round() / 100.0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ramp_ends_and_clamps() {
+        assert_eq!(ramp_color(0.0), "#cde2fb");
+        assert_eq!(ramp_color(1.0), "#0d366b");
+        assert_eq!(ramp_color(-1.0), ramp_color(0.0));
+        assert_eq!(ramp_color(2.0), ramp_color(1.0));
+        assert_eq!(ramp_color(0.5), "#3987e5");
+    }
+
+    #[test]
+    fn opacity_fades_in() {
+        assert_eq!(heat_opacity(0.01), 0.0);
+        assert_eq!(heat_opacity(0.05), 0.13);
+        assert_eq!(heat_opacity(0.1), 0.27);
+        assert_eq!(heat_opacity(0.5), 0.53);
+        assert_eq!(heat_opacity(1.0), 0.8);
+    }
+
+    #[test]
+    fn accuracy_circle_is_a_closed_ring_at_the_radius() {
+        let circle = accuracy_circle(42.7, 23.3, 1000.0);
+        let ring = circle["coordinates"][0].as_array().unwrap();
+        assert_eq!(ring.len(), 65);
+        assert_eq!(ring[0], ring[64]);
+        let north = &ring[16];
+        let metres = (north[1].as_f64().unwrap() - 42.7) * 111_320.0;
+        assert!((metres - 1000.0).abs() < 0.1, "{metres}");
+    }
+}

@@ -117,3 +117,58 @@ pub fn summarize(body: &[u8]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn varints() {
+        let mut i = 0;
+        assert_eq!(read_varint(&[0xac, 0x02], &mut i), Some(300));
+        assert_eq!(i, 2);
+        // -1 as a 64-bit varint
+        let mut minus_one = vec![0xff; 9];
+        minus_one.push(0x01);
+        assert_eq!(read_varint(&minus_one, &mut 0).map(|v| v as i64), Some(-1));
+        // truncated
+        assert_eq!(read_varint(&[0x80], &mut 0), None);
+    }
+
+    #[test]
+    fn parse_rejects_what_isnt_protobuf() {
+        // field 0 doesn't exist
+        assert!(parse(&[0x00, 0x01]).is_none());
+        // length past the end
+        assert!(parse(&[0x0a, 0x05, 0x01]).is_none());
+        // wire type 3 (groups) isn't used
+        assert!(parse(&[0x0b]).is_none());
+        assert_eq!(parse(&[]).map(|f| f.len()), Some(0));
+    }
+
+    #[test]
+    fn summarize_counts_nested_fields() {
+        // field 22 (a cell) twice, each with field 1 = 284 and field 3 = -1
+        let cell = [0x08, 0x9c, 0x02, 0x18, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+        let mut message = vec![];
+        for _ in 0..2 {
+            message.extend([0xb2, 0x01, cell.len() as u8]);
+            message.extend(cell);
+        }
+        let mut body = vec![0, 1, 0, 0, 0, 1, 0, 0];
+        body.extend((message.len() as u16).to_be_bytes());
+        body.extend(&message);
+
+        let summary = summarize(&body);
+        assert!(summary.contains(&format!("declares {} bytes, {} follow", message.len(), message.len())));
+        let line = |field: &str| summary.lines().find(|l| l.starts_with(&format!("{field} "))).unwrap().to_string();
+        assert!(line("22").contains("(message)"), "{summary}");
+        assert!(line("22.1").contains("284: 2"), "{summary}");
+        assert!(line("22.3").contains("-1: 2"), "{summary}");
+    }
+
+    #[test]
+    fn summarize_survives_short_replies() {
+        assert!(summarize(&[1, 2, 3]).starts_with("reply: 3 bytes"));
+    }
+}

@@ -25,7 +25,7 @@ use clap::ValueEnum;
 use crate::coverage::Propagation;
 use crate::fetch::AppleWPSClient;
 use crate::lookup::{self, NotFound, Source};
-use crate::cli::default_model;
+use crate::cli::{default_model, ModelArgs};
 use crate::heatmap::{heatmap_document, DEFAULT_RADIUS_KM};
 
 const SOURCE_HEADER: header::HeaderName = header::HeaderName::from_static("x-wtfps-source");
@@ -58,34 +58,10 @@ async fn heatmap(
     Path(key): Path<(i32, i32, i32, i64)>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    let geojson = match query.get("format").map(String::as_str) {
-        None | Some("html") => false,
-        Some("geojson") => true,
-        Some(other) => {
-            let message = format!("unknown format {other:?}: use html or geojson\n");
-            return (StatusCode::BAD_REQUEST, message).into_response();
-        }
+    let (geojson, model) = match parse_query(&query) {
+        Ok(parsed) => parsed,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
-    let mut model = default_model();
-    if let Some(value) = query.get("terrain") {
-        match value.to_ascii_lowercase().as_str() {
-            "true" | "1" => model.terrain = true,
-            "false" | "0" => model.terrain = false,
-            _ => {
-                let message = format!("unknown terrain {value:?}: use true or false\n");
-                return (StatusCode::BAD_REQUEST, message).into_response();
-            }
-        }
-    }
-    if let Some(name) = query.get("propagation") {
-        match Propagation::from_str(name, true) {
-            Ok(propagation) => model.propagation = propagation,
-            Err(_) => {
-                let message = format!("unknown propagation {name:?}: use hata or simple\n");
-                return (StatusCode::BAD_REQUEST, message).into_response();
-            }
-        }
-    }
 
     let pool = match state.schema_ready.load(Ordering::Relaxed) {
         true => Ok(&state.pool),
@@ -111,6 +87,29 @@ async fn heatmap(
     }
 }
 
+/// Whether GeoJSON was asked for, and the model settings, from the query parameters; or
+/// the message for a 400 response.
+fn parse_query(query: &HashMap<String, String>) -> std::result::Result<(bool, ModelArgs), String> {
+    let geojson = match query.get("format").map(String::as_str) {
+        None | Some("html") => false,
+        Some("geojson") => true,
+        Some(other) => return Err(format!("unknown format {other:?}: use html or geojson\n")),
+    };
+    let mut model = default_model();
+    if let Some(value) = query.get("terrain") {
+        model.terrain = match value.to_ascii_lowercase().as_str() {
+            "true" | "1" => true,
+            "false" | "0" => false,
+            _ => return Err(format!("unknown terrain {value:?}: use true or false\n")),
+        };
+    }
+    if let Some(name) = query.get("propagation") {
+        model.propagation = Propagation::from_str(name, true)
+            .map_err(|_| format!("unknown propagation {name:?}: use hata or simple\n"))?;
+    }
+    Ok((geojson, model))
+}
+
 /// 404 for a cell Apple has no location for, 500 for anything else, with the message.
 fn error_response(e: anyhow::Error) -> Response {
     let status = if e.downcast_ref::<NotFound>().is_some() {
@@ -120,4 +119,48 @@ fn error_response(e: anyhow::Error) -> Response {
         StatusCode::INTERNAL_SERVER_ERROR
     };
     (status, format!("{e:#}\n")).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn defaults() {
+        let (geojson, model) = parse_query(&query(&[])).unwrap();
+        assert!(!geojson);
+        assert_eq!(model.propagation, Propagation::Hata);
+        assert!(!model.terrain);
+    }
+
+    #[test]
+    fn options() {
+        let (geojson, model) =
+            parse_query(&query(&[("format", "geojson"), ("propagation", "Simple"), ("terrain", "TRUE")])).unwrap();
+        assert!(geojson);
+        assert_eq!(model.propagation, Propagation::Simple);
+        assert!(model.terrain);
+        assert!(parse_query(&query(&[("terrain", "1")])).unwrap().1.terrain);
+        assert!(!parse_query(&query(&[("terrain", "0")])).unwrap().1.terrain);
+        assert!(!parse_query(&query(&[("format", "html")])).unwrap().0);
+    }
+
+    #[test]
+    fn bad_values_are_rejected() {
+        for (name, value) in [("format", "png"), ("propagation", "okumura"), ("terrain", "yes")] {
+            let message = parse_query(&query(&[(name, value)])).unwrap_err();
+            assert!(message.starts_with(&format!("unknown {name} \"{value}\"")), "{message}");
+        }
+    }
+
+    #[test]
+    fn status_codes() {
+        let not_found = error_response(NotFound("no such cell".into()).into());
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error_response(anyhow::anyhow!("boom")).status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }

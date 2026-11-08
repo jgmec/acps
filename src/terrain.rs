@@ -276,6 +276,92 @@ pub fn diffraction_loss(dem: &Dem, frame: &Frame, lat: f64, lon: f64, mhz: f64, 
 mod tests {
     use super::*;
 
+    #[test]
+    fn tile_names() {
+        assert_eq!(tile_name(42, 25), "Copernicus_DSM_COG_10_N42_00_E025_00_DEM");
+        assert_eq!(tile_name(-1, -71), "Copernicus_DSM_COG_10_S01_00_W071_00_DEM");
+        assert_eq!(tile_name(0, 0), "Copernicus_DSM_COG_10_N00_00_E000_00_DEM");
+    }
+
+    #[test]
+    fn knife_edge_loss() {
+        assert_eq!(knife_edge_db(-1.0), 0.0);
+        // ITU-R P.526: about 6 dB with the edge just touching the path
+        assert!((knife_edge_db(0.0) - 6.0).abs() < 0.1, "{}", knife_edge_db(0.0));
+        assert!((knife_edge_db(1.0) - 13.9).abs() < 0.2, "{}", knife_edge_db(1.0));
+        let mut last = 0.0;
+        for i in -7..50 {
+            let db = knife_edge_db(i as f64 * 0.1);
+            assert!(db >= last, "not increasing at {i}");
+            last = db;
+        }
+    }
+
+    /// a DEM of 0.001° samples around (42, 25) with `height(lat, lon)` in metres
+    fn dem(height: impl Fn(f64, f64) -> f64) -> Dem {
+        let (north, west, d, n) = (42.2, 24.8, 0.001, 401);
+        let metres = (0..n * n)
+            .map(|i| height(north - (i / n) as f64 * d, west + (i % n) as f64 * d) as i16)
+            .collect();
+        Dem { grids: vec![Grid { north, west, dlat: d, dlon: d, width: n, height: n, metres }] }
+    }
+
+    fn frame() -> Frame {
+        Frame { lat: 42.0, lon: 25.0, metres_per_degree_lon: METRES_PER_DEGREE * 42f64.to_radians().cos(), half_width_m: 8000.0 }
+    }
+
+    #[test]
+    fn elevation_is_bilinear_and_zero_outside() {
+        let dem = dem(|lat, _| (lat - 41.8) * 1000.0);
+        assert!((dem.elevation(42.0, 25.0) - 200.0).abs() < 1.0);
+        assert!((dem.elevation(42.0005, 25.0) - 200.5).abs() < 1.0);
+        assert_eq!(dem.elevation(50.0, 25.0), 0.0);
+    }
+
+    #[test]
+    fn frame_round_trip() {
+        let frame = frame();
+        let (lat, lon) = frame.to_lat_lon(1234.0, -567.0);
+        let (x, y) = frame.to_xy(lat, lon);
+        assert!((x - 1234.0).abs() < 1e-6 && (y + 567.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn terrain_loss_lookup() {
+        let loss = TerrainLoss { half_width_m: 1000.0, size: 4, loss_db: vec![8.0; 16] };
+        assert_eq!(loss.at(0.0, 0.0), 8.0);
+        assert_eq!(loss.at(990.0, -990.0), 8.0);
+        assert_eq!(loss.at(1300.0, 0.0), 0.0);
+        // rows run from north to south
+        let mut rows = vec![0.0; 16];
+        rows[..4].fill(10.0);
+        let loss = TerrainLoss { half_width_m: 1000.0, size: 4, loss_db: rows };
+        assert_eq!(loss.at(0.0, 900.0), 10.0);
+        assert_eq!(loss.at(0.0, -900.0), 0.0);
+    }
+
+    #[test]
+    fn flat_ground_has_no_diffraction_loss() {
+        let dem = dem(|_, _| 300.0);
+        let loss = diffraction_loss(&dem, &frame(), 42.0, 25.0, 1800.0, 48);
+        let max = loss.loss_db.iter().copied().fold(0.0, f32::max);
+        assert!(max < 1.0, "{max} dB");
+    }
+
+    #[test]
+    fn a_ridge_shadows_the_far_side() {
+        // a 200 m east-west ridge 2 km north of the cell
+        let ridge_lat = 42.0 + 2000.0 / METRES_PER_DEGREE;
+        let dem = dem(|lat, _| if (lat - ridge_lat).abs() < 0.0015 { 200.0 } else { 0.0 });
+        let frame = frame();
+        let loss = diffraction_loss(&dem, &frame, 42.0, 25.0, 1800.0, 64);
+        let behind = loss.at(0.0, 5000.0);
+        let in_front = loss.at(0.0, 1000.0);
+        let south = loss.at(0.0, -5000.0);
+        assert!(behind > 15.0, "{behind} dB behind the ridge");
+        assert!(in_front < 1.0 && south < 1.0, "{in_front} {south}");
+    }
+
     /// Needs the N42 E025 tile in WTFPS_DEM_DIR (or `dem`): `cargo test -- --ignored`.
     #[tokio::test]
     #[ignore]

@@ -98,7 +98,7 @@ Works like `explore todo/crawl` but for cell towers. Seed `cell_todo` with one o
 
 Seeds in `cell_todo` are queried first. After that, wtfps crawls by area: every discovered cell is assigned an H3 resolution 7 area (~5 km²) per operator (`mcc`, `mnc`), and one random known cell is queried per uncrawled area in `cell_crawl`. Cells Apple returns without a location are recorded in `cell_not_found`. Cells stored before area crawling existed are assigned areas automatically on the next run.
 
-Apple returns the same fixed group of ~100 cells for every cell in that group, so crawling neighbours alone can't leave the first group. When no areas are left, wtfps probes: an LTE cell ID is `site * 256 + sector`, so it guesses cells at site numbers next to known sites (±1 and ±2, or ±10 and ±20 for operators numbering sites in tens), reusing the known site's TACs and sectors. About 1 in 8 guesses is found, and each hit brings in a new group to crawl. Known sites are tracked in `cell_site`, and every guess is recorded in `cell_probe` so it is never repeated. Pass `--no-probe` to skip probing.
+Apple returns the same fixed group of ~100 cells for every cell in that group, so crawling neighbours alone can't leave the first group. When no areas are left, wtfps probes: an LTE cell ID is `site * 256 + sector`, so it guesses cells at site numbers next to known sites (±1 and ±2, or ±10 and ±20 for operators numbering sites in tens), reusing the known site's TACs and sectors. About 1 in 13 of these guesses is found, and each hit brings in a new group to crawl. It also guesses each known site's own missing sectors next to the ones it has (sectors 11 and 12 known: tries 9, 10, 13 and 14), because Apple's replies often lack some of a site's sectors; in a sample of 60 such guesses, 3 were found. Known sites are tracked in `cell_site` (`probed_at` for the neighbouring site numbers, `siblings_probed_at` for the missing sectors), and every guess is recorded in `cell_probe` so it is never repeated. Pass `--no-probe` to skip probing.
 
 ```sh
 # seed with a known cell tower (mcc, mnc, tac_id, cell_id)
@@ -125,8 +125,9 @@ select count(*) from cell;
 -- cells Apple has no location for
 select count(*) from cell_not_found;
 
--- known sites waiting to be probed
-select count(*) from cell_site where probed_at is null;
+-- known sites waiting to be probed (neighbouring site numbers, own missing sectors)
+select count(*) filter (where probed_at is null), count(*) filter (where siblings_probed_at is null)
+from cell_site;
 
 -- guessed cells tried and found
 select count(*), count(*) filter (where found) from cell_probe;
@@ -416,6 +417,8 @@ If you don't have Nix setup on your system, you will need:
 - Postgres 16 with PostGIS: the [Docker Compose setup](#running-with-docker-compose) provides it
 
 Build with `SQLX_OFFLINE=true cargo build --release`: the WiFi queries are checked at compile time against the saved query metadata in `.sqlx/`. After changing one of those `query!` macros, regenerate it against a running database with the [SQLx CLI](https://github.com/launchbadge/sqlx/tree/main/sqlx-cli#install) (`cargo install sqlx-cli --no-default-features --features rustls,postgres`, then `cargo sqlx prepare`). The cell queries are checked at run time and don't need this.
+
+Run the tests with `cargo test`. They need neither a database nor network access. They cover the coverage model (Okumura–Hata numbers, band table, antenna directions, terrain loss), probe guesses, reply parsing and the API's query parameters, and check that the HTML map's copy of the model constants and band table matches `coverage.rs`. `cargo test -- --ignored` also reads real elevation tiles from `dem/` (the N42 E025 tile, downloaded by a `--terrain` heatmap of a cell there).
 
 | File | Contents |
 |---|---|

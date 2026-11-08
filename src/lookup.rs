@@ -8,13 +8,8 @@ use sqlx::PgPool;
 
 use crate::fetch::{AppleWPSClient, Location};
 use crate::protobuf::CellTower;
-use crate::cells::{cell_key, commit_cells, merge_found, query_cells, CellKey};
+use crate::cells::{cell_key, commit_cells, merge_found, query_cells, sibling_sectors, CellKey};
 use crate::heatmap::{nearby_from_db, NearbyCell, HEATMAP_MAX_CELLS};
-
-/// Sector numbers tried around the cell's own on its site. Apple's reply for a cell often
-/// lacks its own site's other sectors, which antenna directions need; operators number a
-/// site's sectors consecutively (1, 2, 3 or 61, 62, 63), so the nearest numbers usually hit.
-const SIBLING_OFFSETS: [i64; 4] = [-2, -1, 1, 2];
 
 /// The cell isn't in the database (with fetching off), or Apple has no location for it.
 #[derive(Debug)]
@@ -28,6 +23,16 @@ impl std::fmt::Display for NotFound {
 
 impl std::error::Error for NotFound {}
 
+/// The cell and its site's neighbouring sector numbers (see `sibling_sectors`). Apple's
+/// reply for a cell often lacks its own site's other sectors, which antenna directions need.
+fn with_siblings(key: CellKey) -> Vec<CellKey> {
+    let (mcc, mnc, tac_id, cell_id) = key;
+    let site = cell_id >> 8;
+    let mut keys = vec![key];
+    keys.extend(sibling_sectors(&[cell_id & 255].into()).into_iter().map(|s| (mcc, mnc, tac_id, (site << 8) | s)));
+    keys
+}
+
 /// Ask Apple for the cell and for its site's neighbouring sector numbers. Fails if the
 /// request for the cell itself fails; guesses that fail or don't exist are dropped.
 pub async fn fetch_with_siblings(
@@ -35,15 +40,7 @@ pub async fn fetch_with_siblings(
     key: CellKey,
 ) -> Result<Vec<(CellTower, Option<Location>)>> {
     let (mcc, mnc, tac_id, cell_id) = key;
-    let (site, sector) = (cell_id >> 8, cell_id & 255);
-    let mut keys = vec![key];
-    keys.extend(
-        SIBLING_OFFSETS
-            .iter()
-            .map(|offset| sector + offset)
-            .filter(|s| (0..=255).contains(s))
-            .map(|s| (mcc, mnc, tac_id, (site << 8) | s)),
-    );
+    let keys = with_siblings(key);
 
     let mut results = vec![];
     for (asked, reply) in query_cells(client, &keys).await {
@@ -237,7 +234,11 @@ fn bearing_deg(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 /// Now in UTC as ISO 8601 ("2026-11-06T09:30:00Z") and as shown on the map
 /// ("2026-11-06 09:30 UTC").
 fn utc_now() -> (String, String) {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    utc_strings(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64)
+}
+
+/// `utc_now` for a time in seconds since 1970-01-01 UTC.
+fn utc_strings(secs: i64) -> (String, String) {
     let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // civil date from days since 1970-01-01 (Howard Hinnant's algorithm)
     let z = days + 719_468;
@@ -254,4 +255,101 @@ fn utc_now() -> (String, String) {
         format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z"),
         format!("{year:04}-{month:02}-{day:02} {h:02}:{m:02} UTC"),
     )
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    const KEY: CellKey = (284, 5, 106, 451645);
+
+    fn reply(mnc: u32, cell_id: u32, lat: f64, lon: f64) -> (CellTower, Option<Location>) {
+        let tower = CellTower { mcc: 284, mnc, tac_id: 106, cell_id, location: None, uarfcn: Some(3350), pid: Some(250) };
+        let loc = Location { lat, lon, acc: 800, alt: None, alt_acc: None, unknown_11: None, unknown_12: Some(4000) };
+        (tower, Some(loc))
+    }
+
+    /// the test cell and three neighbours 1, 2 and 60 km north, one of another operator
+    pub(crate) fn replies() -> Vec<(CellTower, Option<Location>)> {
+        let km = 1.0 / 111.195;
+        vec![
+            reply(5, 451646, 42.7 + 2.0 * km, 23.3),
+            reply(5, 451645, 42.7, 23.3),
+            reply(5, 451647, 42.7 + km, 23.3),
+            reply(5, 451648, 42.7 + 60.0 * km, 23.3),
+            reply(1, 451649, 42.7 + km, 23.3),
+            (CellTower { cell_id: u32::MAX, ..reply(5, 0, 0.0, 0.0).0 }, reply(5, 0, 42.7, 23.3).1),
+        ]
+    }
+
+    #[test]
+    fn siblings_of_a_cell() {
+        assert_eq!(
+            with_siblings(KEY),
+            [KEY, (284, 5, 106, 451643), (284, 5, 106, 451644), (284, 5, 106, 451646), (284, 5, 106, 451647)]
+        );
+        // sector 0 of site 1764: no negative sectors, and no step into the previous site
+        let first = (284, 5, 106, 1764 << 8);
+        assert_eq!(with_siblings(first), [first, (284, 5, 106, (1764 << 8) | 1), (284, 5, 106, (1764 << 8) | 2)]);
+    }
+
+    #[test]
+    fn nearby_from_replies_filters_and_sorts() {
+        let rows = nearby_from_replies(KEY, 50.0, 800, replies()).unwrap();
+        let ids: Vec<i64> = rows.iter().map(|r| r.cell_id).collect();
+        // same operator, within 50 km, nearest first; no area estimate
+        assert_eq!(ids, [451645, 451647, 451646]);
+        assert_eq!(rows[0].distance_m, 0.0);
+        assert_eq!(rows[0].bearing_deg, None);
+        assert!((rows[1].distance_m - 1000.0).abs() < 5.0, "{}", rows[1].distance_m);
+        assert!(rows[1].bearing_deg.unwrap() < 0.1);
+        assert_eq!((rows[0].earfcn, rows[0].pci, rows[0].unknown_12), (Some(3350), Some(250), Some(4000)));
+
+        let rows = nearby_from_replies(KEY, 50.0, 2, replies()).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn nearby_from_replies_without_the_cell_is_not_found() {
+        let replies: Vec<_> = replies().into_iter().filter(|(c, _)| c.cell_id != 451645).collect();
+        let Err(err) = nearby_from_replies(KEY, 50.0, 800, replies) else { panic!("found") };
+        assert!(err.downcast_ref::<NotFound>().is_some(), "{err:#}");
+    }
+
+    #[test]
+    fn great_circle_distance_and_bearing() {
+        // Sofia to Plovdiv: about 132 km, east-south-east
+        let d = distance_m(42.6977, 23.3219, 42.1354, 24.7453);
+        assert!((d - 132_000.0).abs() < 1500.0, "{d}");
+        let b = bearing_deg(42.6977, 23.3219, 42.1354, 24.7453);
+        assert!((110.0..125.0).contains(&b), "{b}");
+        assert!((bearing_deg(0.0, 0.0, 0.0, 1.0) - 90.0).abs() < 1e-9);
+        assert!((bearing_deg(0.0, 0.0, -1.0, 0.0) - 180.0).abs() < 1e-9);
+        assert!((bearing_deg(0.0, 0.0, 0.0, -1.0) - 270.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn utc_dates() {
+        assert_eq!(utc_strings(0).0, "1970-01-01T00:00:00Z");
+        assert_eq!(utc_strings(951_782_400).0, "2000-02-29T00:00:00Z");
+        assert_eq!(utc_strings(1_700_000_000), ("2023-11-14T22:13:20Z".into(), "2023-11-14 22:13 UTC".into()));
+        assert_eq!(utc_strings(4_102_444_799).0, "2099-12-31T23:59:59Z");
+    }
+
+    #[test]
+    fn source_names() {
+        assert_eq!((Source::Database.name(), Source::Database.saved(), Source::Database.note()), ("database", true, None));
+        assert_eq!((Source::Fetched(3).name(), Source::Fetched(3).saved()), ("fetched", true));
+        let online = Source::Online("database unavailable");
+        assert_eq!((online.name(), online.saved()), ("online", false));
+        assert_eq!(online.note().unwrap(), "from Apple, not saved: database unavailable");
+    }
+
+    #[test]
+    fn only_connection_failures_count_as_unreachable() {
+        assert!(database_unreachable(&sqlx::Error::PoolTimedOut.into()));
+        assert!(database_unreachable(&sqlx::Error::Io(std::io::ErrorKind::ConnectionRefused.into()).into()));
+        assert!(!database_unreachable(&sqlx::Error::RowNotFound.into()));
+        assert!(!database_unreachable(&anyhow::anyhow!("something else")));
+    }
 }

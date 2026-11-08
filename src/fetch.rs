@@ -172,3 +172,37 @@ fn coord(coord: Option<i64>) -> Option<f64> {
         Some(x) => Some(x as f64 * 1e-8),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protobuf;
+
+    #[test]
+    fn coordinates_are_scaled_and_not_found_is_none() {
+        assert_eq!(coord(Some(4_266_709_899)), Some(42.66709899));
+        assert_eq!(coord(Some(-18_000_000_000)), None);
+        assert_eq!(coord(None), None);
+    }
+
+    #[test]
+    fn location_from_reply() {
+        let raw = protobuf::Location {
+            latitude: Some(4_264_409_255),
+            longitude: Some(2_330_012_512),
+            horizontal_accuracy: Some(1414),
+            unknown_12: Some(3200),
+            ..Default::default()
+        };
+        let loc = Location::from_raw(raw).unwrap();
+        assert_eq!((loc.lat, loc.lon, loc.acc, loc.unknown_12), (42.64409255, 23.30012512, 1414, Some(3200)));
+
+        let not_found = protobuf::Location {
+            latitude: Some(-18_000_000_000),
+            longitude: Some(-18_000_000_000),
+            horizontal_accuracy: Some(-1),
+            ..Default::default()
+        };
+        assert!(Location::from_raw(not_found).is_none());
+    }
+}

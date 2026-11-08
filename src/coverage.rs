@@ -528,3 +528,344 @@ fn typical_spacing(xy: &[(f64, f64)]) -> f64 {
     nearest.sort_by(f64::total_cmp);
     if nearest.is_empty() { 1000.0 } else { nearest[nearest.len() / 2] }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LAT: f64 = 42.7;
+    const LON: f64 = 23.3;
+
+    /// a cell `x` metres east and `y` metres north of (LAT, LON)
+    fn cell(x: f64, y: f64, earfcn: Option<i32>) -> ModelCell {
+        ModelCell {
+            lat: LAT + y / METRES_PER_DEGREE,
+            lon: LON + x / (METRES_PER_DEGREE * LAT.to_radians().cos()),
+            acc: Some(500),
+            reach: None,
+            azimuth_deg: None,
+            earfcn,
+            terrain: None,
+        }
+    }
+
+    fn params(propagation: Propagation) -> Params {
+        Params {
+            path_loss: 3.5,
+            sigma_db: 8.0,
+            acc_weight: 0.0,
+            range_m: None,
+            propagation,
+            use_reach: false,
+            directional: false,
+            resolution: None,
+        }
+    }
+
+    fn likelihood(model: &Model, x: f64, y: f64) -> f64 {
+        model.evaluate(x, y, &mut vec![0.0; model.xy.len()]).0
+    }
+
+    /// cells on a square grid `spacing` apart, the first at the origin
+    fn grid(spacing: f64, earfcn: Option<i32>) -> Vec<ModelCell> {
+        let mut cells = vec![cell(0.0, 0.0, earfcn)];
+        for i in -3..=3 {
+            for j in -3..=3 {
+                if (i, j) != (0, 0) {
+                    cells.push(cell(i as f64 * spacing, j as f64 * spacing, earfcn));
+                }
+            }
+        }
+        cells
+    }
+
+    #[test]
+    fn lte_bands_are_sorted_and_disjoint() {
+        for band in LTE_BANDS {
+            assert!(band.0 <= band.1, "{band:?}");
+        }
+        for pair in LTE_BANDS.windows(2) {
+            assert!(pair[0].1 < pair[1].0, "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn earfcn_to_band_and_frequency() {
+        assert_eq!(lte_band(3350), Some((7, 2600)));
+        assert_eq!(lte_band(1850), Some((3, 1800)));
+        assert_eq!(lte_band(6300), Some((20, 800)));
+        // between bands 5 and 7
+        assert_eq!(lte_band(2700), None);
+        assert_eq!(lte_band(-1), None);
+        let close = |a: Option<f64>, b: f64| (a.unwrap() - b).abs() < 1e-9;
+        assert!(close(downlink_mhz(3350), 2680.0));
+        assert!(close(downlink_mhz(1850), 1870.0));
+        assert!(close(downlink_mhz(6300), 806.0));
+        assert!(close(downlink_mhz(0), 2110.0));
+        assert_eq!(downlink_mhz(2700), None);
+    }
+
+    #[test]
+    fn hata_matches_hand_calculation() {
+        // 900 MHz, 30 m mast, 1.5 m phone: 69.55 + 26.16 lg 900 - 13.82 lg 30 - a(1.5)
+        assert!((hata_loss_1km_db(900.0) - 126.40).abs() < 0.01, "{}", hata_loss_1km_db(900.0));
+        // COST-231 above 1500 MHz: 46.3 + 33.9 lg 1800 - 13.82 lg 30 - a(1.5)
+        assert!((hata_loss_1km_db(1800.0) - 136.20).abs() < 0.05, "{}", hata_loss_1km_db(1800.0));
+    }
+
+    #[test]
+    fn hata_radius_grows_with_lower_frequency_and_open_land() {
+        use Environment::*;
+        for env in [Urban, Suburban, Rural] {
+            assert!(hata_radius_m(800.0, env) > hata_radius_m(1800.0, env));
+            assert!(hata_radius_m(1800.0, env) > hata_radius_m(2600.0, env));
+        }
+        for mhz in [800.0, 1800.0, 2600.0] {
+            assert!(hata_radius_m(mhz, Rural) > hata_radius_m(mhz, Suburban));
+            assert!(hata_radius_m(mhz, Suburban) > hata_radius_m(mhz, Urban));
+        }
+        // the link budget's distance: 140 dB at the radius
+        let r = hata_radius_m(900.0, Urban);
+        let slope = 44.9 - 6.55 * HATA_MAST_M.log10();
+        assert!((hata_loss_1km_db(900.0) + slope * (r / 1000.0).log10() - 140.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn environment_thresholds() {
+        assert_eq!(Environment::from_spacing(500.0).name(), "urban");
+        assert_eq!(Environment::from_spacing(800.0).name(), "suburban");
+        assert_eq!(Environment::from_spacing(1999.0).name(), "suburban");
+        assert_eq!(Environment::from_spacing(2000.0).name(), "rural");
+    }
+
+    #[test]
+    fn sector_gain_pattern() {
+        let deg = f64::to_radians;
+        assert_eq!(sector_gain_db(0.0), 0.0);
+        assert!((sector_gain_db(deg(65.0)) + 12.0).abs() < 1e-9);
+        assert!((sector_gain_db(deg(-65.0)) + 12.0).abs() < 1e-9);
+        assert_eq!(sector_gain_db(deg(180.0)), -FRONT_TO_BACK_DB);
+        // angles wrap around
+        assert!((sector_gain_db(deg(350.0)) - sector_gain_db(deg(-10.0))).abs() < 1e-9);
+        assert!((sector_gain_db(deg(370.0)) - sector_gain_db(deg(10.0))).abs() < 1e-9);
+    }
+
+    #[test]
+    fn azimuths_point_away_from_the_site_centre() {
+        // three sectors 200 m out at 0°, 120° and 240°, a fourth on another band sharing the
+        // first one's PCI, and a lone cell of another site
+        let m_lon = METRES_PER_DEGREE * LAT.to_radians().cos();
+        let at = |bearing: f64, d: f64| {
+            let b = bearing.to_radians();
+            (LAT + d * b.cos() / METRES_PER_DEGREE, LON + d * b.sin() / m_lon)
+        };
+        let (a, b, c, d) = (at(0.0, 200.0), at(120.0, 200.0), at(240.0, 200.0), at(0.0, 220.0));
+        let cells = [
+            (1764, Some(10), a.0, a.1),
+            (1764, Some(11), b.0, b.1),
+            (1764, Some(12), c.0, c.1),
+            (1764, Some(10), d.0, d.1),
+            (1765, Some(20), LAT, LON),
+        ];
+        let azimuths = estimate_azimuths(&cells);
+        let near = |got: Option<f64>, want: f64| {
+            let diff = (got.unwrap() - want + 180.0).rem_euclid(360.0) - 180.0;
+            diff.abs() < 3.0
+        };
+        assert!(near(azimuths[0], 0.0), "{azimuths:?}");
+        assert!(near(azimuths[1], 120.0), "{azimuths:?}");
+        assert!(near(azimuths[2], 240.0), "{azimuths:?}");
+        // the same PCI gets the same direction
+        assert_eq!(azimuths[0], azimuths[3]);
+        assert_eq!(azimuths[4], None);
+    }
+
+    #[test]
+    fn azimuths_need_two_directions_and_a_visible_offset() {
+        // one direction on two bands
+        assert_eq!(estimate_azimuths(&[(1, Some(5), LAT, LON), (1, Some(5), LAT + 0.01, LON)]), [None, None]);
+        // sectors 10 m apart
+        let close = [(1, Some(5), LAT, LON), (1, Some(6), LAT + 10.0 / METRES_PER_DEGREE, LON)];
+        assert_eq!(estimate_azimuths(&close), [None, None]);
+        // without a PCI, each cell is its own direction
+        let azimuths = estimate_azimuths(&[(1, None, LAT, LON), (1, None, LAT + 0.01, LON)]);
+        assert!(azimuths.iter().all(Option::is_some));
+    }
+
+    #[test]
+    fn typical_spacing_ignores_same_mast_sectors() {
+        let xy: Vec<(f64, f64)> = (0..10).map(|i| (i as f64 * 500.0, 0.0)).collect();
+        assert_eq!(typical_spacing(&xy), 500.0);
+        // a second sector 5 m from each mast doesn't make the area look denser
+        let with_sectors: Vec<_> = xy.iter().flat_map(|&(x, y)| [(x, y), (x + 5.0, y)]).collect();
+        assert_eq!(typical_spacing(&with_sectors), 495.0);
+        assert_eq!(typical_spacing(&[]), 1000.0);
+        assert_eq!(typical_spacing(&[(0.0, 0.0)]), 1000.0);
+    }
+
+    #[test]
+    fn range_and_environment_from_spacing_and_band() {
+        let urban = Model::new(&grid(500.0, Some(1850)), &params(Propagation::Hata));
+        assert!(urban.range_basis.contains("urban"), "{}", urban.range_basis);
+        let rural = Model::new(&grid(5000.0, Some(1850)), &params(Propagation::Hata));
+        assert!(rural.range_basis.contains("rural"), "{}", rural.range_basis);
+        assert!(rural.range_m > urban.range_m);
+        // a lower band reaches further in the same place
+        let low = Model::new(&grid(5000.0, Some(6300)), &params(Propagation::Hata));
+        assert!(low.range_m > rural.range_m);
+
+        // without a band, or with the simple model: 4x the spacing, within its bounds
+        let simple = Model::new(&grid(1000.0, Some(1850)), &params(Propagation::Simple));
+        assert!((simple.range_m - 4000.0).abs() < 1e-6, "{}", simple.range_m);
+        assert_eq!(simple.range_basis, "4x cell spacing");
+        let unknown = Model::new(&grid(100.0, None), &params(Propagation::Hata));
+        assert_eq!(unknown.range_m, MIN_RANGE_M);
+        let far = Model::new(&grid(50_000.0, None), &params(Propagation::Hata));
+        assert_eq!(far.range_m, MAX_RANGE_M);
+
+        let set = Model::new(&grid(500.0, Some(1850)), &Params { range_m: Some(7000.0), ..params(Propagation::Hata) });
+        assert_eq!((set.range_m, set.range_basis.as_str()), (7000.0, "set"));
+        assert_eq!(set.extent, 3.0 * 7000.0);
+    }
+
+    #[test]
+    fn other_channels_spacing_does_not_make_a_rural_cell_urban() {
+        // same-channel cells 5 km apart, with other-band sectors 300 m from each
+        let mut cells = grid(5000.0, Some(1850));
+        let others: Vec<ModelCell> = cells.iter().map(|c| ModelCell { lat: c.lat + 0.0027, earfcn: Some(6300), ..cell(0.0, 0.0, None) }).collect();
+        cells.extend(others);
+        let model = Model::new(&cells, &params(Propagation::Hata));
+        assert!(model.range_basis.contains("rural"), "{}", model.range_basis);
+    }
+
+    #[test]
+    fn two_equal_cells_split_at_the_midpoint() {
+        let cells = [cell(0.0, 0.0, Some(1850)), cell(2000.0, 0.0, Some(1850))];
+        let model = Model::new(&cells, &params(Propagation::Hata));
+        let mut power = [0.0; 2];
+        let (share, _, best, best_share) = model.evaluate(1000.0, 0.0, &mut power);
+        // equal power at the midpoint
+        assert!((power[0] - power[1]).abs() < 1e-9);
+        assert!(share < 0.5 && (share - best_share).abs() < 1e-9 || best == 0);
+        assert!(likelihood(&model, 200.0, 0.0) > 0.85);
+        assert!(likelihood(&model, 1800.0, 0.0) < 0.15);
+        // symmetric around the target
+        assert!((likelihood(&model, 0.0, 700.0) - likelihood(&model, 0.0, -700.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_lower_band_wins_over_a_higher_one_at_the_same_place() {
+        // target on 1800 MHz, a competitor on 800 MHz on the same mast
+        let cells = [cell(0.0, 0.0, Some(1850)), cell(0.0, 0.0, Some(6300))];
+        let hata = Model::new(&cells, &params(Propagation::Hata));
+        assert!(hata.frequency_loss[1] < -5.0, "{:?}", hata.frequency_loss);
+        assert!(likelihood(&hata, 500.0, 0.0) < 0.2);
+        // the simple model ignores frequency
+        let simple = Model::new(&cells, &params(Propagation::Simple));
+        assert_eq!(simple.frequency_loss, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn coverage_fades_out_beyond_the_range() {
+        let cells = [cell(0.0, 0.0, None)];
+        let model = Model::new(&cells, &Params { range_m: Some(5000.0), ..params(Propagation::Simple) });
+        let near = likelihood(&model, 1000.0, 0.0);
+        let at_range = likelihood(&model, 5000.0, 0.0);
+        let far = likelihood(&model, 15_000.0, 0.0);
+        assert!(near > 0.95 && (at_range - 0.5).abs() < 0.01 && far < 0.1, "{near} {at_range} {far}");
+    }
+
+    #[test]
+    fn directional_cells_cover_a_wedge() {
+        let mut target = cell(0.0, 0.0, None);
+        target.azimuth_deg = Some(90.0);
+        let cells = [target, cell(3000.0, 0.0, None), cell(-3000.0, 0.0, None)];
+        let on = Model::new(&cells, &Params { directional: true, ..params(Propagation::Simple) });
+        let off = Model::new(&cells, &params(Propagation::Simple));
+        assert!(likelihood(&on, 1200.0, 0.0) > likelihood(&on, -1200.0, 0.0) + 0.3);
+        assert!((likelihood(&off, 1200.0, 0.0) - likelihood(&off, -1200.0, 0.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn terrain_loss_weakens_the_cell_behind_it() {
+        // 20 dB of loss everywhere north of the target
+        let size = 64;
+        let loss_db = (0..size * size).map(|i| if i / size < size / 2 { 20.0 } else { 0.0 }).collect();
+        let mut target = cell(0.0, 0.0, None);
+        target.terrain = Some(Arc::new(TerrainLoss { half_width_m: 10_000.0, size, loss_db }));
+        let cells = [target, cell(0.0, 3000.0, None), cell(0.0, -3000.0, None)];
+        let model = Model::new(&cells, &params(Propagation::Simple));
+        assert!(likelihood(&model, 0.0, 1000.0) < likelihood(&model, 0.0, -1000.0) - 0.3);
+    }
+
+    #[test]
+    fn compute_summarises_the_likely_area() {
+        let cells = [cell(0.0, 0.0, None)];
+        let p = Params { range_m: Some(2000.0), resolution: Some(Resolution::Nine), ..params(Propagation::Simple) };
+        let coverage = compute(&cells, &p).unwrap();
+        assert_eq!(coverage.resolution, Resolution::Nine);
+        // likelihood > 50% up to the range: a disc of about 2 km
+        let disc = PI * 2.0f64.powi(2);
+        assert!((coverage.area_km2 / disc - 1.0).abs() < 0.1, "{} km²", coverage.area_km2);
+        assert!((coverage.reach_m - 2000.0).abs() < 200.0, "{} m", coverage.reach_m);
+        assert!(coverage.hexes.iter().all(|h| h.likelihood >= MIN_LIKELIHOOD && h.best == 0));
+    }
+
+    #[test]
+    fn automatic_resolution_is_coarser_for_rural_areas() {
+        let town = compute(&[cell(0.0, 0.0, None)], &Params { range_m: Some(1500.0), ..params(Propagation::Simple) });
+        let rural = compute(&[cell(0.0, 0.0, None)], &Params { range_m: Some(30_000.0), ..params(Propagation::Simple) });
+        assert_eq!(town.unwrap().resolution, FINEST_AUTO_RES);
+        assert!(rural.unwrap().resolution < FINEST_AUTO_RES);
+    }
+
+    #[test]
+    fn likelihood_bands_are_nested_around_the_cell() {
+        let cells = [cell(0.0, 0.0, None), cell(3000.0, 0.0, None)];
+        let p = Params { range_m: Some(3000.0), ..params(Propagation::Simple) };
+        let bands = likelihood_bands(&cells, &p, &[0.1, 0.5, 0.9], 100.0).unwrap();
+        assert_eq!(bands.len(), 3);
+        assert!(bands.windows(2).all(|b| b[0].min_v() < b[1].min_v()));
+        // the top band contains the cell itself (ray casting over its outer rings)
+        let inside = |ring: &[contour::Pt]| {
+            ring.windows(2).filter(|e| (e[0].y > LAT) != (e[1].y > LAT)).filter(|e| {
+                LON < e[0].x + (LAT - e[0].y) / (e[1].y - e[0].y) * (e[1].x - e[0].x)
+            }).count() % 2 == 1
+        };
+        let top = bands.last().unwrap().geometry();
+        assert!(top.0.iter().any(|polygon| inside(&polygon.exterior().0)));
+    }
+
+    /// The HTML map (src/heatmap.html) has its own copy of the model; check its constants
+    /// and band table against these.
+    #[test]
+    fn html_map_uses_the_same_constants() {
+        let html = include_str!("heatmap.html");
+        let expect = |line: String| assert!(html.contains(&line), "src/heatmap.html lacks {line:?}");
+        expect(format!(
+            "const MIN_RANGE_M = {}, MAX_RANGE_M = {}, EXTENT_PER_RANGE = {};",
+            MIN_RANGE_M, MAX_RANGE_M, EXTENT_PER_RANGE
+        ));
+        expect(format!(
+            "const HATA_MAST_M = {}, HATA_PHONE_M = {}, HATA_MAX_PATH_LOSS_DB = {};",
+            HATA_MAST_M, HATA_PHONE_M, HATA_MAX_PATH_LOSS_DB
+        ));
+        expect(format!(
+            "spacing < {} ? \"urban\" : spacing < {} ? \"suburban\" : \"rural\"",
+            URBAN_SPACING_M, SUBURBAN_SPACING_M
+        ));
+        expect(format!("Math.max({}, hataRadiusM(", MIN_HATA_RANGE_M));
+        expect(format!("c.acc > 0 ? c.acc : {};", DEFAULT_ACC_M));
+        expect(format!("const M_LAT = {};", METRES_PER_DEGREE));
+        expect(format!("(theta * 180 / Math.PI / {}) ** 2, {})", BEAMWIDTH_DEG, FRONT_TO_BACK_DB));
+
+        let start = html.find("const BANDS = [").expect("BANDS table") + "const BANDS = ".len();
+        let end = start + html[start..].find("]];").unwrap() + 2;
+        let table: Vec<Vec<f64>> = serde_json::from_str(&html[start..end]).unwrap();
+        let ours: Vec<Vec<f64>> = LTE_BANDS
+            .iter()
+            .map(|b| vec![b.0.into(), b.1.into(), b.2.into(), b.3.into(), b.4])
+            .collect();
+        assert_eq!(table, ours);
+    }
+}

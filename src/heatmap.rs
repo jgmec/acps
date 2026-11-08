@@ -309,3 +309,83 @@ pub(crate) fn model_coverage<'a>(
         bands,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::default_model;
+    use crate::lookup::{nearby_from_replies, Source};
+
+    const KEY: CellKey = (284, 5, 106, 451645);
+
+    fn rows() -> Vec<NearbyCell> {
+        nearby_from_replies(KEY, 50.0, 800, crate::lookup::tests::replies()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn geojson_document() {
+        let (document, neighbours) =
+            heatmap_document(KEY, rows(), &default_model(), true, &Source::Online("no database")).await.unwrap();
+        assert_eq!(neighbours, 2);
+        let json: serde_json::Value = serde_json::from_str(&document).unwrap();
+        let features = json["features"].as_array().unwrap();
+        let role = |r: &str| features.iter().filter(|f| f["properties"]["role"] == r).count();
+        assert_eq!((role("cell"), role("nearby"), role("accuracy")), (1, 2, 1));
+        assert!(role("coverage") > 0);
+        let cell = features.iter().find(|f| f["properties"]["role"] == "cell").unwrap();
+        assert_eq!(cell["properties"]["source"], "online");
+        assert_eq!(cell["properties"]["saved"], false);
+        assert_eq!(cell["properties"]["cell_id"], 451645);
+        assert_eq!(cell["geometry"]["coordinates"], serde_json::json!([23.3, 42.7]));
+    }
+
+    #[tokio::test]
+    async fn html_document_embeds_the_data() {
+        let mut model = default_model();
+        model.propagation = coverage::Propagation::Simple;
+        let (html, _) = heatmap_document(KEY, rows(), &model, false, &Source::Database).await.unwrap();
+        assert!(!html.contains("/*DATA*/null"));
+        let start = html.find("const DATA = ").unwrap() + "const DATA = ".len();
+        let end = start + html[start..].find(";\n").unwrap();
+        let data: serde_json::Value = serde_json::from_str(&html[start..end].replace("<\\/", "</")).unwrap();
+        assert_eq!(data["target"]["cell_id"], 451645);
+        assert_eq!(data["cells"].as_array().unwrap().len(), 2);
+        assert_eq!(data["propagation"], "simple");
+        assert_eq!(data["note"], serde_json::Value::Null);
+        assert_eq!(data["terrain"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn document_without_the_cell_fails() {
+        let rows: Vec<_> = rows().into_iter().filter(|r| r.cell_id != 451645).collect();
+        assert!(heatmap_document(KEY, rows, &default_model(), true, &Source::Database).await.is_err());
+    }
+
+    #[test]
+    fn contour_levels_are_checked() {
+        let target = &rows()[0];
+        let mut model = default_model();
+        model.contours = true;
+        for levels in [vec![], vec![0.5, 0.1], vec![0.0, 0.5], vec![0.5, 1.0]] {
+            model.contour_levels = levels.clone();
+            assert!(model_coverage(target, &[], &model, &TerrainMap::new()).is_err(), "{levels:?}");
+        }
+        model.contour_levels = vec![0.25, 0.75];
+        assert!(model_coverage(target, &[], &model, &TerrainMap::new()).is_ok());
+    }
+
+    #[test]
+    fn same_frequency_competitors_by_default() {
+        let rows = rows();
+        let mut other_band = rows[1].clone();
+        other_band.cell_id = 999;
+        other_band.earfcn = Some(6300);
+        let nearby = [&rows[1], &rows[2], &other_band];
+        let model = default_model();
+        let only = model_coverage(&rows[0], &nearby, &model, &TerrainMap::new()).unwrap();
+        assert!(only.same_frequency_only);
+        assert_eq!(only.competitors.len(), 3);
+        let all = model_coverage(&rows[0], &nearby, &ModelArgs { all_frequencies: true, ..model }, &TerrainMap::new()).unwrap();
+        assert_eq!(all.competitors.len(), 4);
+    }
+}

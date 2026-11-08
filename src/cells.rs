@@ -383,12 +383,76 @@ pub(crate) async fn commit_cells(
     Ok(())
 }
 
-/// Known sites probed per round; each yields up to 4 neighbour sites x 2 sectors x its TACs.
+/// Known sites probed per round; each yields up to 4 neighbour sites x 2 sectors x its TACs,
+/// plus its own missing sector numbers next to the known ones x its TACs.
 pub(crate) const PROBE_SITES: i64 = 32;
 
 pub(crate) const PROBE_SITE_OFFSETS: [i64; 4] = [-2, -1, 1, 2];
 
 pub(crate) const PROBE_SECTORS: usize = 2;
+
+/// Sector numbers tried around a site's known ones. Apple's replies often lack some of a
+/// site's sectors; operators number them consecutively (1, 2, 3 or 11, 12, 13), so the
+/// nearest numbers usually hit.
+pub(crate) const SIBLING_OFFSETS: [i64; 4] = [-2, -1, 1, 2];
+
+/// Sector numbers (0-255) within SIBLING_OFFSETS of a known one that aren't known themselves.
+pub(crate) fn sibling_sectors(known: &BTreeSet<i64>) -> BTreeSet<i64> {
+    known
+        .iter()
+        .flat_map(|sector| SIBLING_OFFSETS.iter().map(move |offset| sector + offset))
+        .filter(|s| (0..=255).contains(s) && !known.contains(s))
+        .collect()
+}
+
+/// Step between an operator's site numbers: 10 if (of at least 10 sites sampled) 80% or
+/// more are multiples of 10, else 1.
+pub(crate) fn site_step(sampled: i64, multiples_of_ten: i64) -> i64 {
+    if sampled >= 10 && multiples_of_ten * 10 >= sampled * 8 { 10 } else { 1 }
+}
+
+/// Site numbers guessed around a known site.
+pub(crate) fn neighbour_sites(site: i64, step: i64) -> impl Iterator<Item = i64> {
+    PROBE_SITE_OFFSETS.iter().map(move |offset| site + offset * step).filter(|&s| s >= 0)
+}
+
+/// What a probe guess is: a sector of a neighbouring, unknown site number, or a missing
+/// sector of a known site.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Guess {
+    NeighbourSite,
+    Sibling,
+}
+
+/// Probe guesses for one known site from its cells (TAC, cell ID): neighbouring site
+/// numbers with its first sectors (if `neighbours`), and its own missing sectors next to the
+/// known ones (if `siblings`), each in every TAC the site uses.
+pub(crate) fn site_guesses(
+    site: i64,
+    cells: &[(i32, i64)],
+    step: i64,
+    neighbours: bool,
+    siblings: bool,
+) -> Vec<(i32, i64, Guess)> {
+    let tacs: BTreeSet<i32> = cells.iter().map(|&(tac_id, _)| tac_id).collect();
+    let sectors: BTreeSet<i64> = cells.iter().map(|&(_, cell_id)| cell_id & 255).collect();
+    let mut guesses = vec![];
+    for &tac_id in &tacs {
+        if neighbours {
+            for neighbour in neighbour_sites(site, step) {
+                for &sector in sectors.iter().take(PROBE_SECTORS) {
+                    guesses.push((tac_id, (neighbour << 8) | sector, Guess::NeighbourSite));
+                }
+            }
+        }
+        if siblings {
+            for sector in sibling_sectors(&sectors) {
+                guesses.push((tac_id, (site << 8) | sector, Guess::Sibling));
+            }
+        }
+    }
+    guesses
+}
 
 pub(crate) fn key_columns(keys: &[CellKey]) -> (Vec<i32>, Vec<i32>, Vec<i32>, Vec<i64>) {
     let (mut mccs, mut mncs, mut tacs, mut cell_ids) = (vec![], vec![], vec![], vec![]);
@@ -401,22 +465,26 @@ pub(crate) fn key_columns(keys: &[CellKey]) -> (Vec<i32>, Vec<i32>, Vec<i32>, Ve
     (mccs, mncs, tacs, cell_ids)
 }
 
-/// Guess cells at site numbers next to a batch of unprobed known sites (an LTE cell id
-/// is site * 256 + sector) and store whatever the hits return. Returns false once every
-/// known site has been probed.
+/// Guess cells for a batch of known sites (an LTE cell id is site * 256 + sector): at site
+/// numbers next to each site, and the site's own missing sector numbers next to its known
+/// ones; store whatever the hits return. Returns false once every known site has been
+/// probed both ways.
 pub(crate) async fn probe_cells(client: &AppleWPSClient, pool: &PgPool) -> Result<bool> {
-    let sites: Vec<(i32, i32, i64)> =
-        sqlx::query_as("select mcc, mnc, site from cell_site where probed_at is null limit $1")
-            .bind(PROBE_SITES)
-            .fetch_all(pool)
-            .await?;
+    // (mcc, mnc, site, neighbour sites still to guess, own sectors still to guess)
+    let sites: Vec<(i32, i32, i64, bool, bool)> = sqlx::query_as(
+        "select mcc, mnc, site, probed_at is null, siblings_probed_at is null from cell_site \
+         where probed_at is null or siblings_probed_at is null limit $1",
+    )
+    .bind(PROBE_SITES)
+    .fetch_all(pool)
+    .await?;
     if sites.is_empty() {
         return Ok(false);
     }
 
     // some operators number their sites in tens
     let mut steps = BTreeMap::new();
-    for &(mcc, mnc, _) in &sites {
+    for &(mcc, mnc, ..) in &sites {
         if steps.contains_key(&(mcc, mnc)) {
             continue;
         }
@@ -428,13 +496,12 @@ pub(crate) async fn probe_cells(client: &AppleWPSClient, pool: &PgPool) -> Resul
         .bind(mnc)
         .fetch_one(pool)
         .await?;
-        let step = if total >= 10 && tens * 10 >= total * 8 { 10 } else { 1 };
-        steps.insert((mcc, mnc), step);
+        steps.insert((mcc, mnc), site_step(total, tens));
     }
 
     // guesses reuse the source site's TACs and sectors; remember the source of each guess
     let mut guesses = BTreeMap::new();
-    for &source @ (mcc, mnc, site) in &sites {
+    for &(mcc, mnc, site, neighbours, siblings) in &sites {
         let cells: Vec<(i32, i64)> = sqlx::query_as(
             "select tac_id, cell_id from cell \
              where mcc = $1 and mnc = $2 and cell_id between $3 and $4",
@@ -445,33 +512,24 @@ pub(crate) async fn probe_cells(client: &AppleWPSClient, pool: &PgPool) -> Resul
         .bind((site << 8) | 255)
         .fetch_all(pool)
         .await?;
-        let tacs: BTreeSet<i32> = cells.iter().map(|&(tac_id, _)| tac_id).collect();
-        let sectors: BTreeSet<i64> = cells.iter().map(|&(_, cell_id)| cell_id & 255).collect();
-
-        for offset in PROBE_SITE_OFFSETS {
-            let neighbour = site + offset * steps[&(mcc, mnc)];
-            if neighbour < 0 {
-                continue;
-            }
-            for &tac_id in &tacs {
-                for &sector in sectors.iter().take(PROBE_SECTORS) {
-                    guesses
-                        .entry((mcc, mnc, tac_id, (neighbour << 8) | sector))
-                        .or_insert(source);
-                }
-            }
+        for (tac_id, cell_id, kind) in site_guesses(site, &cells, steps[&(mcc, mnc)], neighbours, siblings) {
+            guesses.entry((mcc, mnc, tac_id, cell_id)).or_insert(((mcc, mnc, site), kind));
         }
     }
 
-    // skip sites we already know and guesses tried before
+    // skip guesses tried before; at neighbouring site numbers, sites we already know; for
+    // a site's own sectors, cells we already know (in any TAC)
     let keys: Vec<CellKey> = guesses.keys().copied().collect();
+    let is_sibling: Vec<bool> = guesses.values().map(|&(_, kind)| kind == Guess::Sibling).collect();
     let (mccs, mncs, tacs, cell_ids) = key_columns(&keys);
     let skip: Vec<CellKey> = sqlx::query_as(
         "select t.mcc, t.mnc, t.tac_id, t.cell_id \
-         from unnest($1::integer[], $2::integer[], $3::integer[], $4::bigint[]) \
-             as t(mcc, mnc, tac_id, cell_id) \
-         where exists (select 1 from cell_site s \
-                       where (s.mcc, s.mnc, s.site) = (t.mcc, t.mnc, t.cell_id >> 8)) \
+         from unnest($1::integer[], $2::integer[], $3::integer[], $4::bigint[], $5::bool[]) \
+             as t(mcc, mnc, tac_id, cell_id, sibling) \
+         where (not t.sibling and exists (select 1 from cell_site s \
+                       where (s.mcc, s.mnc, s.site) = (t.mcc, t.mnc, t.cell_id >> 8))) \
+            or (t.sibling and exists (select 1 from cell c \
+                       where (c.mcc, c.mnc, c.cell_id) = (t.mcc, t.mnc, t.cell_id))) \
             or exists (select 1 from cell_probe p \
                        where (p.mcc, p.mnc, p.tac_id, p.cell_id) = (t.mcc, t.mnc, t.tac_id, t.cell_id))",
     )
@@ -479,6 +537,7 @@ pub(crate) async fn probe_cells(client: &AppleWPSClient, pool: &PgPool) -> Resul
     .bind(&mncs)
     .bind(&tacs)
     .bind(&cell_ids)
+    .bind(&is_sibling)
     .fetch_all(pool)
     .await?;
     for key in skip {
@@ -486,7 +545,13 @@ pub(crate) async fn probe_cells(client: &AppleWPSClient, pool: &PgPool) -> Resul
     }
 
     let keys: Vec<CellKey> = guesses.keys().copied().collect();
-    info!("probing {} guessed cells near {} sites...", keys.len(), sites.len());
+    let siblings = guesses.values().filter(|&&(_, kind)| kind == Guess::Sibling).count();
+    info!(
+        "probing {} guessed cells near {} sites ({} of them missing sectors of known sites)...",
+        keys.len(),
+        sites.len(),
+        siblings
+    );
     let mut probed = Vec::new();
     let mut failed_sites = BTreeSet::new();
     let mut results = Vec::new();
@@ -504,7 +569,7 @@ pub(crate) async fn probe_cells(client: &AppleWPSClient, pool: &PgPool) -> Resul
             // the source site stays unprobed, so its guesses are retried in a later round
             Err(e) => {
                 warn!("probe {key:?} failed: {e:#}");
-                failed_sites.insert(guesses[&key]);
+                failed_sites.insert(guesses[&key].0);
             }
         }
     }
@@ -537,13 +602,14 @@ pub(crate) async fn probe_cells(client: &AppleWPSClient, pool: &PgPool) -> Resul
     .await?;
 
     let (mut mccs, mut mncs, mut site_ids) = (vec![], vec![], vec![]);
-    for &(mcc, mnc, site) in sites.iter().filter(|s| !failed_sites.contains(*s)) {
+    for &(mcc, mnc, site, ..) in sites.iter().filter(|s| !failed_sites.contains(&(s.0, s.1, s.2))) {
         mccs.push(mcc);
         mncs.push(mnc);
         site_ids.push(site);
     }
     sqlx::query(
-        "update cell_site s set probed_at = current_timestamp \
+        "update cell_site s set probed_at = coalesce(s.probed_at, current_timestamp), \
+             siblings_probed_at = coalesce(s.siblings_probed_at, current_timestamp) \
          from unnest($1::integer[], $2::integer[], $3::bigint[]) as t(mcc, mnc, site) \
          where (s.mcc, s.mnc, s.site) = (t.mcc, t.mnc, t.site)",
     )
@@ -608,5 +674,112 @@ pub(crate) async fn backfill_cell_areas(pool: &PgPool) -> Result<()> {
         tx.commit().await?;
 
         info!("backfilled crawl areas for {} cells", rows.len());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protobuf;
+
+    fn tower(mnc: u32, tac_id: u32, cell_id: u32, earfcn: Option<u32>) -> CellTower {
+        CellTower { mcc: 284, mnc, tac_id, cell_id, location: None, uarfcn: earfcn, pid: None }
+    }
+
+    fn location(lat: f64) -> Option<Location> {
+        Some(Location { lat, lon: 23.3, acc: 500, alt: None, alt_acc: None, unknown_11: None, unknown_12: None })
+    }
+
+    #[test]
+    fn radio_value_treats_minus_one_as_unknown() {
+        assert_eq!(radio_value(Some(3350)), Some(3350));
+        assert_eq!(radio_value(Some(u32::MAX)), None);
+        assert_eq!(radio_value(None), None);
+        // too large for the database column
+        assert_eq!(radio_value(Some(u32::MAX - 1)), None);
+    }
+
+    #[test]
+    fn merge_found_drops_area_estimates_and_merges_repeats() {
+        let results = vec![
+            (tower(5, 106, SENTINEL_CELL_ID, None), location(42.6)),
+            (tower(5, 106, 451645, None), location(42.7)),
+            // the same cell in another reply, now with its EARFCN
+            (tower(5, 106, 451645, Some(3350)), location(42.8)),
+            // not found in one reply, found in another: counts as found
+            (tower(5, 106, 451646, None), None),
+            (tower(5, 106, 451646, None), location(42.9)),
+            (tower(5, 106, 451647, None), None),
+        ];
+        let (found, not_found) = merge_found(results);
+        assert_eq!(found.len(), 2);
+        let (loc, earfcn, pci) = &found[&(284, 5, 106, 451645)];
+        // the first location is kept, radio details from any sighting
+        assert_eq!((loc.lat, *earfcn, *pci), (42.7, Some(3350), None));
+        assert!(found.contains_key(&(284, 5, 106, 451646)));
+        assert_eq!(not_found.into_iter().collect::<Vec<_>>(), vec![(284, 5, 106, 451647)]);
+    }
+
+    #[test]
+    fn cell_key_widens_without_sign_changes() {
+        let key = cell_key(&protobuf::CellTower { cell_id: u32::MAX - 1, ..tower(5, 106, 0, None) });
+        assert_eq!(key, (284, 5, 106, i64::from(u32::MAX - 1)));
+    }
+
+    #[test]
+    fn cell_area_is_an_h3_resolution_7_cell() {
+        let area = cell_area(42.6977, 23.3219).unwrap();
+        let index = h3o::CellIndex::try_from(area as u64).unwrap();
+        assert_eq!(index.resolution(), CELL_CRAWL_RES);
+        // nearby points share it, far ones don't
+        assert_eq!(cell_area(42.6978, 23.3220).unwrap(), area);
+        assert_ne!(cell_area(42.15, 24.75).unwrap(), area);
+        assert!(cell_area(f64::NAN, 0.0).is_err());
+    }
+
+    #[test]
+    fn sibling_sectors_fill_gaps_and_edges() {
+        let known: BTreeSet<i64> = [11, 12, 13].into();
+        assert_eq!(sibling_sectors(&known), [9, 10, 14, 15].into());
+        // only 0-255
+        assert_eq!(sibling_sectors(&[0].into()), [1, 2].into());
+        assert_eq!(sibling_sectors(&[255].into()), [253, 254].into());
+        // a gap between known sectors is filled once
+        assert_eq!(sibling_sectors(&[1, 3].into()), [0, 2, 4, 5].into());
+        assert!(sibling_sectors(&BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn site_step_detects_numbering_in_tens() {
+        assert_eq!(site_step(100, 85), 10);
+        assert_eq!(site_step(100, 50), 1);
+        // too few sites to tell
+        assert_eq!(site_step(5, 5), 1);
+        assert_eq!(neighbour_sites(1764, 1).collect::<Vec<_>>(), [1762, 1763, 1765, 1766]);
+        assert_eq!(neighbour_sites(10, 10).collect::<Vec<_>>(), [0, 20, 30]);
+    }
+
+    #[test]
+    fn site_guesses_cover_neighbours_and_siblings() {
+        // site 1764 with sectors 1 and 2 in TAC 106, and sector 1 again in TAC 107
+        let cells = [(106, (1764 << 8) | 1), (106, (1764 << 8) | 2), (107, (1764 << 8) | 1)];
+        let guesses = site_guesses(1764, &cells, 1, true, true);
+        let siblings: BTreeSet<(i32, i64)> = guesses
+            .iter()
+            .filter(|g| g.2 == Guess::Sibling)
+            .map(|&(tac, cell, _)| (tac, cell & 255))
+            .collect();
+        // sectors 0, 3 and 4 in both TACs
+        assert_eq!(siblings, [(106, 0), (106, 3), (106, 4), (107, 0), (107, 3), (107, 4)].into());
+        assert!(guesses.iter().filter(|g| g.2 == Guess::Sibling).all(|g| g.1 >> 8 == 1764));
+
+        let neighbours: Vec<_> = guesses.iter().filter(|g| g.2 == Guess::NeighbourSite).collect();
+        // 4 sites x 2 sectors x 2 TACs
+        assert_eq!(neighbours.len(), 16);
+        assert!(neighbours.iter().all(|g| g.1 >> 8 != 1764 && [1, 2].contains(&(g.1 & 255))));
+
+        assert!(site_guesses(1764, &cells, 1, false, true).iter().all(|g| g.2 == Guess::Sibling));
+        assert!(site_guesses(1764, &cells, 1, true, false).iter().all(|g| g.2 == Guess::NeighbourSite));
+        assert!(site_guesses(1764, &[], 1, true, true).is_empty());
     }
 }
