@@ -21,3 +21,6 @@ profile.json
 .idea/
 .claude/settings.local.json
 .claude/*.tmp.*
+
+# elevation tiles downloaded for --terrain (WTFPS_DEM_DIR)
+/dem/

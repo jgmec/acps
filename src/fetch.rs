@@ -148,23 +148,17 @@ pub struct Location {
 
 impl Location {
     fn from_raw(value: crate::protobuf::Location) -> Option<Self> {
-        let (lat, lon) = (value.latitude, value.longitude);
-        let (lat, lon) = (coord(lat), coord(lon));
-        if let Some(lat) = lat {
-            if let Some(lon) = lon {
-                return Some(Location {
-                    lat,
-                    lon,
-                    acc: value.horizontal_accuracy.unwrap_or_default(),
-                    alt: value.altitude,
-                    alt_acc: value.vertical_accuracy,
-                    unknown_11: value.unknown_11,
-                    unknown_12: value.unknown_12,
-                });
-            }
-        }
-
-        None
+        // Apple uses (-180, -180) for "not found"
+        let (lat, lon) = (coord(value.latitude)?, coord(value.longitude)?);
+        Some(Location {
+            lat,
+            lon,
+            acc: value.horizontal_accuracy.unwrap_or_default(),
+            alt: value.altitude,
+            alt_acc: value.vertical_accuracy,
+            unknown_11: value.unknown_11,
+            unknown_12: value.unknown_12,
+        })
     }
 
     pub fn cell(&self, res: Resolution) -> CellIndex {

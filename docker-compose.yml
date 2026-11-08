@@ -45,10 +45,16 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-test}@db:5432/${POSTGRES_DB:-wtfps}
       RUST_LOG: ${RUST_LOG:-info}
+      # elevation tiles for ?terrain=true, downloaded on first use (~40 MB per 1° square)
+      WTFPS_DEM_DIR: /dem
+    volumes:
+      - dem:/dem
     ports:
       - "${WTFPS_API_PORT:-8090}:8090"
 
 volumes:
+  # a download cache of elevation tiles; safe to delete
+  dem:
   postgis_data:
     external: true
     name: postgis_data

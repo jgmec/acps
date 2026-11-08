@@ -154,6 +154,39 @@ which gives:
 
 clamped to 0.5–60 km. Without a known EARFCN for the target, `hata` falls back to `simple`'s range.
 
+## Terrain
+
+Optional, with either propagation model: `--terrain` (CLI), `?terrain=true` (HTTP API), and the "Terrain" checkbox on maps generated with it. It adds a term to each cell's level:
+
+```
+P_j = …  −  T_j(point)
+```
+
+`T_j` is the diffraction loss from the terrain between cell *j* and the point, from the [Copernicus GLO-30](https://spacedata.copernicus.eu/collections/copernicus-digital-elevation-model) elevation model (30 m grid, worldwide):
+
+- **Geometry**: a 30 m mast at Apple's position of the cell, a phone 1.5 m above the ground at the point. The ground is lowered by the Earth's curvature, d² / (2 · 4/3 · 6371 km), the usual effective Earth radius for radio paths.
+- **Dominant obstacle**: along each of 720 radial lines from the cell (every 0.5°), the terrain point rising highest as seen from the mast so far. A point behind it is shadowed by it.
+- **Loss**: ITU-R P.526 single knife-edge diffraction. With *h* the obstacle's height above the straight line from mast to phone, *d₁* and *d₂* the distances from the mast to the obstacle and from the obstacle to the phone, and λ the wavelength at the cell's frequency:
+
+  ```
+  ν = h · √( 2 · (d₁ + d₂) / (λ · d₁ · d₂) )
+  J(ν) = 6.9 + 20 · log10( √((ν − 0.1)² + 1) + ν − 0.1 )     for ν > −0.78, else 0
+  ```
+
+  So a path that clears every obstacle loses nothing, one grazing an edge loses about 6 dB, and one deep behind a ridge 20–30 dB or more.
+- **Coverage**: computed for the mapped cell and its nearest competitors (30 on its own channel, 15 on others), on a 192 × 192 grid over a square covering the area either propagation model draws. Further cells, and anything outside that square, are treated as over flat ground.
+
+Hata's formulas already include the *average* obstruction of their environment, so terrain adds the effect of *particular* hills on top; in flat areas it changes little, as it should.
+
+| Cell | Without terrain | With terrain |
+|---|---|---|
+| Elena, Bulgaria, band 20, Balkan foothills | 13.39 km², reach 2.2 km, 618 hexagons ≥1% | 13.34 km², reach 3.4 km, 110 hexagons ≥1% |
+| Kon Tum, band 3, flat town | 0.103 km², reach 225 m, 489 hexagons | 0.110 km², reach 240 m, 432 hexagons |
+
+In the hills the core stays about the same size but changes shape (reaching further along open ground), and most of the faint fringe disappears behind ridges; on flat ground almost nothing changes.
+
+**Limits**: one dominant obstacle per path (several ridges in a row are underestimated); the mast is placed at Apple's position, on average 870 m from the real site, and assumed 30 m high, so shadows near the cell are approximate; no buildings or vegetation; without measurements, the result is judged on plausibility (coverage following valleys and stopping at ridges), not checked against real signal.
+
 ## The two models compared
 
 Three cells, same data, both models, with the target competing on its own channel (default) and with every frequency:

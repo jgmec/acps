@@ -15,8 +15,12 @@
 
 use std::f64::consts::{LN_10, PI};
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use h3o::{CellIndex, LatLng, Resolution};
+
+use crate::terrain::TerrainLoss;
 
 /// Apple's smallest reported cell accuracy; used when a cell has none.
 const DEFAULT_ACC_M: f64 = 1414.0;
@@ -34,6 +38,8 @@ pub struct ModelCell {
     pub azimuth_deg: Option<f64>,
     /// LTE channel; gives the cell's frequency for the Okumura-Hata terms
     pub earfcn: Option<i32>,
+    /// diffraction loss from terrain, in the target's local frame, if computed for it
+    pub terrain: Option<Arc<TerrainLoss>>,
 }
 
 /// How signal strength depends on frequency and how far a cell reaches by default.
@@ -133,6 +139,8 @@ struct Model {
     /// extra path loss from each cell's frequency relative to the target's, in dB (zero on
     /// the same frequency, or when either frequency is unknown)
     frequency_loss: Vec<f64>,
+    /// diffraction loss from terrain per cell, in the target's local frame (None: flat)
+    terrain: Vec<Option<Arc<TerrainLoss>>>,
     k: f64,
     temperature: f64,
     p_edge: f64,
@@ -164,6 +172,7 @@ impl Model {
                 .map(|c| c.azimuth_deg.filter(|_| params.directional).map(f64::to_radians))
                 .collect(),
             frequency_loss: vec![],
+            terrain: cells.iter().map(|c| c.terrain.clone()).collect(),
             k: 10.0 * params.path_loss / LN_10,
             temperature: params.sigma_db * 6f64.sqrt() / PI,
             p_edge: 0.0,
@@ -227,6 +236,9 @@ impl Model {
         for (j, &(cx, cy)) in self.xy.iter().enumerate() {
             let d2 = (x - cx).powi(2) + (y - cy).powi(2) + self.blur2[j] + 1.0;
             power[j] = -0.5 * self.k * d2.ln() - self.frequency_loss[j];
+            if let Some(terrain) = &self.terrain[j] {
+                power[j] -= terrain.at(x, y);
+            }
             if let Some(azimuth) = self.azimuth[j] {
                 power[j] += sector_gain_db((x - cx).atan2(y - cy) - azimuth);
             }
@@ -241,6 +253,12 @@ impl Model {
         let share = |p: f64| ((p - max) / t).exp() / sum;
         (share(power[0]), power[0] - self.p_edge, best, share(power[best]))
     }
+}
+
+/// Half-width of the area the model evaluates around the target, in metres (3x the range
+/// it fades out at; see EXTENT_PER_RANGE).
+pub fn extent_m(cells: &[ModelCell], params: &Params) -> f64 {
+    Model::new(cells, params).extent
 }
 
 /// `cells[0]` is the target; the rest are the cells it competes with.
@@ -363,6 +381,12 @@ pub const LTE_BANDS: [(i32, i32, u32, u32, f64); 15] = [
     (41590, 43589, 42, 3500, 3400.0),
 ];
 
+/// LTE band and its nominal frequency in MHz for a downlink EARFCN (3GPP TS 36.101);
+/// same table as the HTML map's
+pub(crate) fn lte_band(earfcn: i32) -> Option<(u32, u32)> {
+    LTE_BANDS.iter().find(|b| (b.0..=b.1).contains(&earfcn)).map(|b| (b.2, b.3))
+}
+
 /// Downlink frequency in MHz of an LTE channel.
 pub fn downlink_mhz(earfcn: i32) -> Option<f64> {
     LTE_BANDS
@@ -455,8 +479,9 @@ const MIN_SECTOR_OFFSET_M: f64 = 30.0;
 /// mostly reflect where phones are.
 pub fn estimate_azimuths(cells: &[(i64, Option<i32>, f64, f64)]) -> Vec<Option<f64>> {
     use std::collections::BTreeMap;
-    // site -> direction group (PCI, or the cell itself without one) -> cell indices
-    let mut sites: BTreeMap<i64, BTreeMap<(Option<i32>, usize), Vec<usize>>> = BTreeMap::new();
+    // direction group (PCI, or the cell itself without one) -> cell indices
+    type Directions = BTreeMap<(Option<i32>, usize), Vec<usize>>;
+    let mut sites: BTreeMap<i64, Directions> = BTreeMap::new();
     for (i, &(site, pci, ..)) in cells.iter().enumerate() {
         let key = (pci, if pci.is_some() { 0 } else { i });
         sites.entry(site).or_default().entry(key).or_default().push(i);

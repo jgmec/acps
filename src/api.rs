@@ -2,7 +2,8 @@
 //! the cell is looked up in the database; if it isn't crawled yet it's fetched from Apple
 //! and saved together with every other cell in the replies, then the map is drawn.
 //! HTML by default, GeoJSON with `?format=geojson`; `?propagation=simple` switches from the
-//! default Okumura-Hata model to the distance-only one. When the database can't be reached the
+//! default Okumura-Hata model to the distance-only one; `?terrain=true` adds diffraction loss
+//! from hills and ridges (elevation tiles are downloaded on first use). When the database can't be reached the
 //! map is built from Apple's replies without saving; `X-Wtfps-Source` says which happened.
 
 use std::collections::HashMap;
@@ -24,7 +25,8 @@ use clap::ValueEnum;
 use crate::coverage::Propagation;
 use crate::fetch::AppleWPSClient;
 use crate::lookup::{self, NotFound, Source};
-use crate::{default_model, heatmap_document, DEFAULT_RADIUS_KM};
+use crate::cli::default_model;
+use crate::heatmap::{heatmap_document, DEFAULT_RADIUS_KM};
 
 const SOURCE_HEADER: header::HeaderName = header::HeaderName::from_static("x-wtfps-source");
 
@@ -65,6 +67,16 @@ async fn heatmap(
         }
     };
     let mut model = default_model();
+    if let Some(value) = query.get("terrain") {
+        match value.to_ascii_lowercase().as_str() {
+            "true" | "1" => model.terrain = true,
+            "false" | "0" => model.terrain = false,
+            _ => {
+                let message = format!("unknown terrain {value:?}: use true or false\n");
+                return (StatusCode::BAD_REQUEST, message).into_response();
+            }
+        }
+    }
     if let Some(name) = query.get("propagation") {
         match Propagation::from_str(name, true) {
             Ok(propagation) => model.propagation = propagation,
@@ -88,7 +100,7 @@ async fn heatmap(
         info!("cell {key:?} wasn't crawled yet: fetched it from Apple and saved {found} cells");
     }
 
-    match heatmap_document(key, rows, &model, geojson, &source) {
+    match heatmap_document(key, rows, &model, geojson, &source).await {
         Ok((document, _)) => {
             let content_type = if geojson { "application/geo+json" } else { "text/html; charset=utf-8" };
             // database, fetched (from Apple and saved) or online (from Apple, not saved)

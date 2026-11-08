@@ -8,10 +8,8 @@ use sqlx::PgPool;
 
 use crate::fetch::{AppleWPSClient, Location};
 use crate::protobuf::CellTower;
-use crate::{
-    cell_key, commit_cells, merge_found, nearby_from_db, query_cells, CellKey, NearbyCell,
-    HEATMAP_MAX_CELLS,
-};
+use crate::cells::{cell_key, commit_cells, merge_found, query_cells, CellKey};
+use crate::heatmap::{nearby_from_db, NearbyCell, HEATMAP_MAX_CELLS};
 
 /// Sector numbers tried around the cell's own on its site. Apple's reply for a cell often
 /// lacks its own site's other sectors, which antenna directions need; operators number a

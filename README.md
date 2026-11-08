@@ -185,6 +185,7 @@ The coverage is a model, not a measurement: signal falls off with distance, and 
 | Only cells on this cell's frequency | on | the cell only competes with cells on its own EARFCN, because operators run several frequency layers over the same area; off when its EARFCN is unknown. When off, lower-frequency cells carry further by Okumura–Hata's frequency term |
 | Contour lines | on | lines at 10, 25, 50, 75 and 90% likelihood, or every 5 dB in the signal view; the thicker 50% line is where the cell becomes the most likely server |
 | Antenna directions | off | experimental: sectors get a wedge-shaped antenna pattern pointing from their site's centre towards their position (a rough estimate); the orange line shows this cell's direction |
+| Terrain | on when the map has it | experimental: diffraction loss from hills and ridges, from Copernicus elevation; only in maps generated with `--terrain` or `?terrain=true` (see [below](#terrain)) |
 | Field 12 | off | experimental: fade out at the cell's own reach from `unknown_12` instead of the shared max range |
 
 Everything is recalculated in the browser as you move the controls; hover anywhere for the values at that spot, or over a cell for its details. The map loads MapLibre, d3-contour and the OpenFreeMap basemap from the internet; the cell data is embedded in the file. See [`examples/`](examples/) for generated maps with screenshots and comparisons of the options.
@@ -208,6 +209,7 @@ The GeoJSON also contains the modelled coverage, calculated by wtfps with the sa
 | `--all-frequencies` | off | compete with cells on every frequency, not just the cell's own EARFCN, each weighted by Okumura–Hata's frequency term |
 | `--directional` | off | experimental: wedge-shaped antenna patterns; adds the cell's direction as a line (`role: "antenna"`) |
 | `--use-unknown-12` | off | experimental: fade out at the cell's own reach from field 12 instead of the shared range |
+| `--terrain` | off | experimental: diffraction loss from hills and ridges (see [below](#terrain)); recorded in the summary's `terrain` |
 | `--hex-res` | 10, coarser for large rural areas | H3 resolution of the hexagons (10: ~0.015 km², 11: ~0.002 km²); chosen automatically so a map has at most ~20,000 |
 | `--contours` | off | write smooth likelihood contour bands instead of hexagons |
 | `--contour-levels` | 0.1,0.25,0.5,0.75,0.9 | where the bands start; the last band runs up to 100% |
@@ -229,6 +231,14 @@ The simple model (`--propagation simple`, `?propagation=simple`, or the selector
 
 Hata was fitted for 150–1500 MHz (COST-231 to 2000 MHz), distances of 1–20 km and masts of 30–200 m; higher bands are extrapolated, and dense town cells a few hundred metres apart are outside its range, as they are outside the simple model's. Apple's field 12 (`unknown_12`) supports the frequency effect: relative to the spacing of their cells, 800 and 900 MHz cells reach 1.7–2× further than 1800 and 2100 MHz cells, where Hata predicts 1.6× (rural) to 2.1× (urban) for 800 against 1800 MHz.
 
+### Terrain
+
+`--terrain` (CLI), `?terrain=true` (HTTP API) and the map's "Terrain" checkbox add diffraction loss from hills and ridges between each cell and each spot, from the free [Copernicus GLO-30](https://spacedata.copernicus.eu/collections/copernicus-digital-elevation-model) elevation model (30 m grid). For each cell, the obstacle rising highest as seen from a 30 m mast at its position gives the ITU-R P.526 single knife-edge loss to every point behind it, with the Earth's curvature. It's computed for the mapped cell and its nearest competitors (30 on its channel, 15 on others) and embedded in the HTML map, so the controls keep working.
+
+It matters in hilly country and little on flat ground: for a rural 800 MHz cell in the Balkan foothills the coverage follows the valleys and stops at ridges (the faint fringe shrinks from 618 to 110 hexagons), while a town cell in flat Kon Tum barely changes (0.103 → 0.110 km²). Details and limits are in [docs/propagation-models.md](docs/propagation-models.md#terrain).
+
+Elevation tiles (1° × 1°, about 40 MB each) are downloaded on first use into `WTFPS_DEM_DIR` (default `dem` in the current directory; `/dem` in the Docker `api` service, a cache volume) and reused. A map with terrain takes a few seconds (decoding tiles and tracing 46 cells) and the HTML grows by about 1.6 MB. Maps with terrain carry the Copernicus attribution the licence asks for.
+
 ### HTTP API
 
 The OpenAPI 3.1 specification is in [docs/openapi.yaml](docs/openapi.yaml); open it in any OpenAPI viewer (for example Swagger Editor or Redocly) for an interactive reference.
@@ -238,7 +248,7 @@ GET /cells/{mcc}/{mnc}/{tac}/{cell}/heatmap                  HTML map
 GET /cells/{mcc}/{mnc}/{tac}/{cell}/heatmap?format=geojson   GeoJSON
 ```
 
-The same lookup as `heatmap`: the cell is looked up in the database; if it isn't crawled yet, it's fetched from Apple with its site's sibling sectors (five requests, about a second) and saved together with every other cell in the replies, then the map is drawn. Later requests for the same cell are served from the database (tens of milliseconds). The HTML map has all the controls above; the GeoJSON uses the default model settings and a 50 km radius. Add `propagation=simple` to use the simple propagation model instead of Okumura–Hata (`propagation=hata`, the default), for both formats; the HTML map then opens with that model selected, and keeps it when you click another cell. On an HTML map served by the API, clicking another cell opens that cell's map (the browser's Back button returns); on a map opened as a file, clicking does nothing.
+The same lookup as `heatmap`: the cell is looked up in the database; if it isn't crawled yet, it's fetched from Apple with its site's sibling sectors (five requests, about a second) and saved together with every other cell in the replies, then the map is drawn. Later requests for the same cell are served from the database (tens of milliseconds). The HTML map has all the controls above; the GeoJSON uses the default model settings and a 50 km radius. Add `terrain=true` to include terrain (see [below](#terrain); slower, and the first map in a new area downloads elevation tiles). Add `propagation=simple` to use the simple propagation model instead of Okumura–Hata (`propagation=hata`, the default), for both formats; the HTML map then opens with that model selected, and keeps it when you click another cell. On an HTML map served by the API, clicking another cell opens that cell's map (the browser's Back button returns); on a map opened as a file, clicking does nothing.
 
 | Status | When |
 |---|---|
@@ -409,12 +419,19 @@ Build with `SQLX_OFFLINE=true cargo build --release`: the WiFi queries are check
 
 | File | Contents |
 |---|---|
-| `src/main.rs` | commands, crawlers, storing replies, heatmap data and GeoJSON |
+| `src/main.rs` | the commands: parsing the command line and running each one |
+| `src/cli.rs` | command-line definitions, including the coverage model's options |
+| `src/db.rs` | database connection: `DATABASE_URL`, a pool that tolerates outages, migrations |
 | `src/fetch.rs` | Apple client (request framing, retries, decoding) |
-| `src/lookup.rs` | heatmap lookup: database first, else fetch from Apple and save |
-| `src/coverage.rs` | coverage model, antenna directions, contour bands |
+| `src/raw.rs` | schema-less dump of Apple's replies (`cell --raw`) |
+| `src/wifi.rs` | WiFi crawler (`explore todo`, `explore crawl`) |
+| `src/cells.rs` | cell crawler (`explore cell`): seeds, area crawl, probing, storing replies |
+| `src/lookup.rs` | heatmap lookup: database first, else fetch from Apple and save, or Apple only |
+| `src/heatmap.rs` | heatmap documents: nearby cells, model setup, terrain, the HTML map |
+| `src/geojson.rs` | GeoJSON output and its styling |
+| `src/coverage.rs` | coverage model: propagation models, antenna directions, LTE bands, contour bands |
+| `src/terrain.rs` | elevation tiles and terrain diffraction loss |
 | `src/heatmap.html` | HTML map template; its JavaScript has its own copy of the model, kept in sync with `coverage.rs` |
 | `src/api.rs` | HTTP API |
-| `src/raw.rs` | schema-less dump of Apple's replies (`cell --raw`) |
 | `src/apple.proto` | Apple's protobuf messages, including the undocumented fields |
 | `migrations/` | database schema, applied automatically |

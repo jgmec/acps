@@ -68,6 +68,18 @@ paths:
             type: string
             enum: [html, geojson]
             default: html
+        - name: terrain
+          in: query
+          required: false
+          description: |
+            Experimental (case-insensitive): add diffraction loss from hills and ridges, from Copernicus GLO-30
+            elevation (see docs/propagation-models.md#terrain). Slower (a few seconds), and the
+            first map in a new area downloads elevation tiles. For HTML, the map gets a
+            "Terrain" checkbox, on by default.
+          schema:
+            type: string
+            enum: ['true', 'false', '1', '0']
+            default: 'false'
         - name: propagation
           in: query
           required: false
@@ -103,7 +115,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/HeatmapGeoJSON'
         '400':
-          description: An unknown `format` or `propagation`, or a path segment that isn't a number.
+          description: An unknown `format`, `propagation` or `terrain`, or a path segment that isn't a number.
           content:
             text/plain:
               schema: {type: string}
@@ -112,6 +124,8 @@ paths:
                   value: "unknown format \"pdf\": use html or geojson\n"
                 propagation:
                   value: "unknown propagation \"cost231\": use hata or simple\n"
+                terrain:
+                  value: "unknown terrain \"yes\": use true or false\n"
                 path:
                   value: "Invalid URL: Cannot parse value at index 1 with value `x` to a `i32`"
         '404':
@@ -291,7 +305,7 @@ components:
     CoverageSummary:
       type: object
       description: The model settings used and the resulting coverage.
-      required: [area_km2, reach_m, competing_cells, same_frequency_only, range_m, range_basis, propagation, path_loss, sigma_db, acc_weight, hex_res]
+      required: [area_km2, reach_m, competing_cells, same_frequency_only, range_m, range_basis, propagation, terrain, path_loss, sigma_db, acc_weight, hex_res]
       properties:
         area_km2: {type: number, description: Area where the cell is the most likely server (likelihood above 50%).}
         reach_m: {type: number, description: Furthest point with a likelihood above 50%.}
@@ -303,6 +317,7 @@ components:
           description: How the range was chosen.
           examples: ['Okumura-Hata, 1855 MHz, urban', '4x cell spacing', set]
         propagation: {type: string, enum: [hata, simple]}
+        terrain: {type: boolean, description: Whether terrain diffraction loss was included (`terrain=true`).}
         reach_from_unknown_12: {type: boolean, description: Whether the cell fades out at its field 12 reach (CLI option; false from the API).}
         target_reach_m: {type: [number, 'null']}
         directional: {type: boolean, description: Whether antenna directions were modelled (CLI option; false from the API).}
