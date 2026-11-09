@@ -92,6 +92,26 @@ field             count  distinct  most common values (value: times)
 ...
 ```
 
+#### 5G cells
+
+Add `--nr` for a 5G NR cell. Its cell identity (NCI) is up to 36 bits, more than the LTE request can carry (Apple cuts LTE cell IDs to 32 bits), so `--nr` uses Apple's separate 5G request; without it, a cell ID over 32 bits is refused:
+
+```
+$ wtfps cell --nr 232 1 17008 17248763906
+cellid: 17248763906
+https://www.openstreetmap.org/search?query=48.18474197%2F16.30678749#map=16/48.18474197/16.30678749
+121 entries in reply
+cell_id       mnc     tac nrarfcn  frequency       pci   acc_m  location
+17248763906     1   17008       -  -                 -    1414  https://www.openstreetmap.org/search?query=48.18474197%2F16.30678749#map=…
+1827209379      5   10148  639936  3599 MHz          -    1414  https://www.openstreetmap.org/search?query=48.19940185%2F16.33818435#map=…
+...
+area est.       5   10143       -  -                 -    3000  https://www.openstreetmap.org/search?query=48.161041250000004%2F16.31849098#map=…
+```
+
+The reply looks like an LTE one: the cell, up to ~100 nearby 5G cells of all operators, and up to 20 tracking-area estimates, here with an accuracy of 3000 instead of 149000. The channel is an NR-ARFCN, shown with its frequency (`639936` is 3599 MHz, band n78; `152210` is 761 MHz, band n28). Apple hasn't sent a PCI for 5G cells so far. `--raw` works too; 5G cells are field `24` of the reply (LTE: `22`), requested in field `29` (LTE: `25`).
+
+Only the `cell` command handles 5G for now: the crawler, the database and heatmaps are LTE only (see [Limits](#limits-lte-only)).
+
 ### `explore cell`
 
 Works like `explore todo/crawl` but for cell towers. Seed `cell_todo` with one or more known cell towers and wtfps will crawl outward, discovering and storing nearby cells returned by Apple's API.
@@ -185,7 +205,7 @@ The coverage is a model, not a measurement: signal falls off with distance, and 
 | Propagation model | Okumura–Hata | `Okumura–Hata (COST-231)`: lower frequencies carry further and the max range comes from Hata's radius (see [below](#propagation-model-and-okumurahata)); `Simple (distance only)`: every frequency is equal and the max range is 4× the cell spacing, the model before Hata was added |
 | Only cells on this cell's frequency | on | the cell only competes with cells on its own EARFCN, because operators run several frequency layers over the same area; off when its EARFCN is unknown. When off, lower-frequency cells carry further by Okumura–Hata's frequency term |
 | Contour lines | on | lines at 10, 25, 50, 75 and 90% likelihood, or every 5 dB in the signal view; the thicker 50% line is where the cell becomes the most likely server |
-| Antenna directions | off | experimental: sectors get a wedge-shaped antenna pattern pointing from their site's centre towards their position (a rough estimate); the orange line shows this cell's direction |
+| Antenna directions | off | experimental: sectors get a wedge-shaped antenna pattern pointing from their site's centre towards their position (a rough estimate; see [Antenna directions](#antenna-directions) for when a cell gets none); the orange line shows this cell's direction |
 | Terrain | on when the map has it | experimental: diffraction loss from hills and ridges, from Copernicus elevation; only in maps generated with `--terrain` or `?terrain=true` (see [below](#terrain)) |
 | Field 12 | off | experimental: fade out at the cell's own reach from `unknown_12` instead of the shared max range |
 
@@ -208,7 +228,7 @@ The GeoJSON also contains the modelled coverage, calculated by wtfps with the sa
 | `--range-km` | Okumura–Hata radius for the band and environment (or 4× spacing), 0.5–60 km | distance at which signal fades out; the summary's `range_basis` says how it was chosen |
 | `--propagation` | `hata` | `hata` (Okumura–Hata / COST-231) or `simple` (distance only, range 4× the cell spacing); recorded in the summary's `propagation` |
 | `--all-frequencies` | off | compete with cells on every frequency, not just the cell's own EARFCN, each weighted by Okumura–Hata's frequency term |
-| `--directional` | off | experimental: wedge-shaped antenna patterns; adds the cell's direction as a line (`role: "antenna"`) |
+| `--directional` | off | experimental: wedge-shaped antenna patterns; adds the cell's direction as a line (`role: "antenna"`); see [Antenna directions](#antenna-directions) |
 | `--use-unknown-12` | off | experimental: fade out at the cell's own reach from field 12 instead of the shared range |
 | `--terrain` | off | experimental: diffraction loss from hills and ridges (see [below](#terrain)); recorded in the summary's `terrain` |
 | `--hex-res` | 10, coarser for large rural areas | H3 resolution of the hexagons (10: ~0.015 km², 11: ~0.002 km²); chosen automatically so a map has at most ~20,000 |
@@ -217,6 +237,39 @@ The GeoJSON also contains the modelled coverage, calculated by wtfps with the sa
 | `--contour-step-m` | 20 | spacing of the grid the contours are traced on |
 
 With `--contours`, the coverage is written as contour bands (`role: "contour"`) instead of hexagons: one MultiPolygon per band between two levels, with `likelihood_min`, `likelihood_max`, a `label` such as `"50–75%"`, and the same styling. Bands don't overlap: each is a ring around the next, so the area where the cell is the most likely server is the sum of the bands from 50% up. The files are smaller than with hexagons and look like the HTML map's heat, except that the bands start at the lowest level (10% by default) where the map fades down to 2%; add a lower level such as `0.02` to show that faint fringe.
+
+### Antenna directions
+
+Apple places each sector a little way out in the direction its antenna points, since that's where phones see it. The heatmap uses this to estimate directions:
+
+1. cells are grouped into sites by `cell_id >> 8` (the LTE eNB number);
+2. cells of one site that share a PCI count as one direction: the same sector on different bands;
+3. the site's centre is the average of those directions, and each sector points from the centre towards its own position.
+
+A cell gets no direction (`azimuth_deg` is null, and the map says "none for this cell") when:
+
+| Reason | Why |
+|---|---|
+| only one sector of its site is known | with one direction there's no centre to measure from. The most common case: Apple's replies often lack some of a site's sectors, and the crawler hasn't found them yet |
+| all known cells of the site share one PCI | e.g. the same sector on bands 3, 7 and 20: still one direction |
+| its sectors sit less than 30 m from the centre | Apple put them on nearly the same spot, so there's no offset to read a direction from |
+| it's a 3G cell | its ID isn't eNB × 256 + sector, so `cell_id >> 8` doesn't group real sites (see [Limits](#limits-lte-only)) |
+
+A cell that isn't in the database yet is fetched together with its neighbouring sector numbers (±1, ±2), which often fills in its site. A cell already in the database uses only what's stored; the crawler's probing of [missing sectors](#explore-cell) fills those gaps over time.
+
+To see why a cell has no direction, list its site's known cells with their PCI and distance from the site's centre (set `mcc`, `mnc` and `cell_id`):
+
+```sql
+with s as (select mcc, mnc, cell_id >> 8 as site from cell
+           where mcc = 284 and mnc = 5 and cell_id = 451645 limit 1),
+c as (select c.cell_id & 255 as sector, c.pci, c.earfcn, c.acc, c.geom
+      from cell c, s where c.mcc = s.mcc and c.mnc = s.mnc and c.cell_id >> 8 = s.site)
+select sector, pci, earfcn, acc,
+       round(ST_Distance(geom, (select ST_Centroid(ST_Collect(geom::geometry))::geography from c))) as m_from_centre
+from c order by sector;
+```
+
+One row means only one sector is known; the same `pci` in every row means one direction; every `m_from_centre` under about 30 means no visible offset. For the example cell this shows sectors 61, 62 and 63, 196–253 m from the centre, so it gets a direction.
 
 ### Propagation model and Okumura–Hata
 
@@ -338,6 +391,10 @@ The external services wtfps calls can be changed in `.env` (compose passes them 
 | `WTFPS_APPLE_CHINA_URL` | `https://gs-loc-cn.apple.com/clls/wloc` | Apple's server for China (`--china`) |
 | `WTFPS_DEM_URL` | `https://copernicus-dem-30m.s3.amazonaws.com` | elevation tiles for terrain; a mirror needs the same `{name}/{name}.tif` layout |
 
+Connections to Apple are kept open and reused. When `WTFPS_APPLE_URL` (or `WTFPS_APPLE_CHINA_URL`) points anywhere else, such as a proxy, wtfps opens a new connection for every request and sends `Connection: close`, and says so when it starts (`using …: a new connection for every request`). Some proxies, Squid as a reverse proxy among them, stop answering requests sent over a reused connection: single `cell` lookups work, but `explore cell`, which sends hundreds of requests over a few connections, gets only `TimedOut`. To check a proxy, run `python3 scripts/proxy-keepalive-test.py` with `WTFPS_APPLE_URL` set: it sends a few lookups over one kept-open connection and a few over new ones.
+
+A value exported in the shell takes precedence over `.env`, for the command line and for `docker compose`.
+
 The image is built from the `Dockerfile` with the official `rust` and `debian` images only; Cargo's downloads and build output are kept in BuildKit cache mounts, so the first build takes about 2.5 minutes and later builds after a source change about 25 seconds. `docker builder prune` clears that cache (it has nothing to do with the database volume).
 
 ### Reading cell coordinates
@@ -407,7 +464,7 @@ Keep `wtfps.dump` until you've checked the restored data.
 
 ## Limits: LTE only
 
-The cell features assume LTE. All cells Apple has returned so far look like LTE, but its replies don't say which radio technology a cell uses, and the database has no column for it. Cells without an EARFCN or PCI, such as 3G cells imported from elsewhere, would work only partly:
+The cell features assume LTE. Apple's LTE replies don't say which radio technology a cell uses, and the database has no column for it. 5G NR cells come through a separate request and reply that only the `cell` command uses so far ([`--nr`](#5g-cells)); storing them would need that column, because LTE and 5G cell IDs can overlap. Cells without an EARFCN or PCI, such as 3G cells imported from elsewhere, would work only partly:
 
 - **Lookup** works: cells in the database are served from it. A missing cell is asked of Apple, which doesn't seem to know 3G cells, so the answer is `404`.
 - **Frequency filter**: with no EARFCN it's off, so the cell competes with every cell of its operator, all channels mixed; with several carriers that makes its area too small. Band names are empty.

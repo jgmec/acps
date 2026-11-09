@@ -22,14 +22,20 @@ pub(crate) enum Command {
     Query {
         mac: String,
     },
+    /// Ask Apple for a cell's location (and the nearby cells it returns); doesn't use the
+    /// database
     Cell {
         mcc: u32,
         mnc: u32,
         tacid: u32,
-        cellid: u32,
+        /// LTE cell ID (up to 32 bits), or with --nr a 5G NR cell identity (NCI, 36 bits)
+        cellid: u64,
         /// print every field of Apple's raw reply, including ones wtfps doesn't decode
         #[arg(long)]
         raw: bool,
+        /// a 5G NR cell: uses Apple's 5G cell request, which keeps the full 36-bit cell ID
+        #[arg(long)]
+        nr: bool,
     },
     Oui {
         oui: String,

@@ -14,6 +14,10 @@ message AppleWLoc {
 
   repeated CellTower cell_tower_response = 22;
   repeated CellTower cell_tower_request = 25;
+
+  // 5G NR cells, found by trying request fields (a 35-bit cell ID survives only here)
+  repeated NrCellTower nr_cell_tower_response = 24;
+  repeated NrCellTower nr_cell_tower_request = 29;
 }
 
 message CellTower {
@@ -23,6 +27,19 @@ message CellTower {
   uint32 tac_id = 4;
   optional Location location = 5;
   optional uint32 uarfcn = 6;
+  optional uint32 pid = 7;
+}
+
+// A 5G NR cell: like CellTower, but with a 64-bit cell identity (NCI, 36 bits) and an
+// NR-ARFCN as channel. Tracking-area estimates use cell_id -1 (u64::MAX), with an accuracy
+// of 3000 instead of LTE's 149000. Apple hasn't sent field 7 (PCI) so far.
+message NrCellTower {
+  uint32 mcc = 1;
+  uint32 mnc = 2;
+  uint64 cell_id = 3;
+  uint32 tac_id = 4;
+  optional Location location = 5;
+  optional uint32 nrarfcn = 6;
   optional uint32 pid = 7;
 }
 

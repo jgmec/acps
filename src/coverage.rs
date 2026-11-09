@@ -395,6 +395,18 @@ pub fn downlink_mhz(earfcn: i32) -> Option<f64> {
         .map(|b| b.4 + 0.1 * f64::from(earfcn - b.0))
 }
 
+/// Frequency in MHz of a 5G NR channel (NR-ARFCN, 3GPP TS 38.104 global raster: 5 kHz steps
+/// below 3 GHz, 15 kHz to 24.25 GHz, 60 kHz above).
+pub fn nr_arfcn_mhz(nrarfcn: i32) -> Option<f64> {
+    let n = f64::from(nrarfcn);
+    match nrarfcn {
+        0..=599_999 => Some(0.005 * n),
+        600_000..=2_016_666 => Some(3000.0 + 0.015 * (n - 600_000.0)),
+        2_016_667..=3_279_165 => Some(24_250.08 + 0.06 * (n - 2_016_667.0)),
+        _ => None,
+    }
+}
+
 // Okumura-Hata (150-1500 MHz) and COST-231 Hata (1500-2000 MHz, extrapolated beyond) with
 // these assumptions, for the frequency loss between cells and the default range. The page
 // (src/heatmap.html) uses the same numbers.
@@ -603,6 +615,20 @@ mod tests {
         assert!(close(downlink_mhz(6300), 806.0));
         assert!(close(downlink_mhz(0), 2110.0));
         assert_eq!(downlink_mhz(2700), None);
+    }
+
+    #[test]
+    fn nr_channels_to_frequency() {
+        let close = |a: Option<f64>, b: f64| (a.unwrap() - b).abs() < 1e-6;
+        // seen in Apple's replies in Vienna: n78 and n28
+        assert!(close(nr_arfcn_mhz(639_936), 3599.04));
+        assert!(close(nr_arfcn_mhz(152_210), 761.05));
+        // the raster's step changes at 3 GHz and 24.25 GHz
+        assert!(close(nr_arfcn_mhz(599_999), 2999.995));
+        assert!(close(nr_arfcn_mhz(600_000), 3000.0));
+        assert!(close(nr_arfcn_mhz(2_016_667), 24_250.08));
+        assert_eq!(nr_arfcn_mhz(3_279_166), None);
+        assert_eq!(nr_arfcn_mhz(-1), None);
     }
 
     #[test]

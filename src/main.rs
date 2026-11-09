@@ -23,11 +23,11 @@ mod wifi;
 
 use crate::cells::{explore_cells, radio_value, CONCURRENT_PARTS, SENTINEL_CELL_ID};
 use crate::cli::{Cli, Command, ExploreSource};
-use crate::coverage::lte_band;
+use crate::coverage::{lte_band, nr_arfcn_mhz};
 use crate::db::{database_url, lazy_pool, migrate_when_reachable};
 use crate::fetch::{AppleWPSClient, Location};
 use crate::heatmap::heatmap_document;
-use crate::protobuf::CellTower;
+use crate::protobuf::{CellTower, NrCellTower};
 use crate::wifi::explore_wifi;
 
 pub mod protobuf {
@@ -77,50 +77,69 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Cell { mcc, mnc, tacid, cellid, raw } =>{
-            let request = CellTower{
-                mcc,
-                mnc,
-                cell_id: cellid,
-                tac_id: tacid,
-                location: None,
-                uarfcn: None,
-                pid: None,
-            };
-            if raw {
-                print!("{}", raw::summarize(&client.query_cell_raw(request).await?));
-                return Ok(());
-            }
-            println!("cellid: {cellid}");
-
-            let cells = client.query_cell(request).await?;
-            if let Some((_, Some(loc))) = cells.first() {
-                println!("{}", osm(loc));
-                println!("{} entries in reply", cells.len());
+        Command::Cell { mcc, mnc, tacid, cellid, raw, nr } => {
+            let rows: Vec<CellRow> = if nr {
+                let request = NrCellTower {
+                    mcc,
+                    mnc,
+                    cell_id: cellid,
+                    tac_id: tacid,
+                    location: None,
+                    nrarfcn: None,
+                    pid: None,
+                };
+                if raw {
+                    print!("{}", raw::summarize(&client.query_nr_cell_raw(request).await?));
+                    return Ok(());
+                }
+                client.query_nr_cell(request).await?.into_iter().map(|(cell, loc)| {
+                    let channel = radio_value(cell.nrarfcn);
+                    CellRow {
+                        area_estimate: cell.cell_id == u64::MAX,
+                        cell_id: cell.cell_id,
+                        mnc: cell.mnc,
+                        tac_id: cell.tac_id,
+                        channel,
+                        band: channel.and_then(nr_arfcn_mhz).map(|mhz| format!("{mhz:.0} MHz")),
+                        pci: radio_value(cell.pid),
+                        acc: cell.location.and_then(|l| l.horizontal_accuracy),
+                        loc,
+                    }
+                }).collect()
             } else {
-                println!("not found")
-            }
-            println!(
-                "{:<12} {:>4} {:>7} {:>7}  {:<14} {:>4} {:>7}  location",
-                "cell_id", "mnc", "tac", "earfcn", "band", "pci", "acc_m"
-            );
-            for (cell, loc) in cells {
-                let dash = || "-".to_string();
-                let earfcn = radio_value(cell.uarfcn);
-                let band = earfcn.and_then(lte_band).map_or_else(dash, |(b, mhz)| format!("{b} ({mhz} MHz)"));
-                let acc = cell.location.and_then(|l| l.horizontal_accuracy);
-                let id = if cell.cell_id == SENTINEL_CELL_ID { "area est.".into() } else { cell.cell_id.to_string() };
-                println!(
-                    "{id:<12} {:>4} {:>7} {:>7}  {band:<14} {:>4} {:>7}  {}",
-                    cell.mnc,
-                    cell.tac_id,
-                    earfcn.map_or_else(dash, |e| e.to_string()),
-                    radio_value(cell.pid).map_or_else(dash, |p| p.to_string()),
-                    acc.map_or_else(dash, |a| a.to_string()),
-                    loc.as_ref().map_or_else(|| "not found".to_string(), osm),
-                );
-            }
-
+                let Ok(cell_id) = u32::try_from(cellid) else {
+                    anyhow::bail!("cell ID {cellid} is longer than 32 bits, too long for LTE: for a 5G cell add --nr");
+                };
+                let request = CellTower {
+                    mcc,
+                    mnc,
+                    cell_id,
+                    tac_id: tacid,
+                    location: None,
+                    uarfcn: None,
+                    pid: None,
+                };
+                if raw {
+                    print!("{}", raw::summarize(&client.query_cell_raw(request).await?));
+                    return Ok(());
+                }
+                client.query_cell(request).await?.into_iter().map(|(cell, loc)| {
+                    let channel = radio_value(cell.uarfcn);
+                    CellRow {
+                        area_estimate: cell.cell_id == SENTINEL_CELL_ID,
+                        cell_id: cell.cell_id.into(),
+                        mnc: cell.mnc,
+                        tac_id: cell.tac_id,
+                        channel,
+                        band: channel.and_then(lte_band).map(|(b, mhz)| format!("{b} ({mhz} MHz)")),
+                        pci: radio_value(cell.pid),
+                        acc: cell.location.and_then(|l| l.horizontal_accuracy),
+                        loc,
+                    }
+                }).collect()
+            };
+            println!("cellid: {cellid}");
+            print_cells(&rows, if nr { ("nrarfcn", "frequency") } else { ("earfcn", "band") });
         }
 
         Command::Heatmap { mcc, mnc, tac_id, cell_id, radius_km, geojson, model, out, online, no_fetch } => {
@@ -171,6 +190,50 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// One entry of a `cell` reply, LTE or 5G NR.
+struct CellRow {
+    area_estimate: bool,
+    cell_id: u64,
+    mnc: u32,
+    tac_id: u32,
+    /// EARFCN or NR-ARFCN
+    channel: Option<i32>,
+    /// LTE band, or the NR channel's frequency
+    band: Option<String>,
+    pci: Option<i32>,
+    acc: Option<i64>,
+    loc: Option<Location>,
+}
+
+/// The `cell` command's output: the asked cell's location, then every entry of the reply.
+/// `columns` names the channel and band columns.
+fn print_cells(rows: &[CellRow], (channel, band): (&str, &str)) {
+    if let Some(CellRow { loc: Some(loc), .. }) = rows.first() {
+        println!("{}", osm(loc));
+        println!("{} entries in reply", rows.len());
+    } else {
+        println!("not found")
+    }
+    println!(
+        "{:<12} {:>4} {:>7} {channel:>7}  {band:<14} {:>4} {:>7}  location",
+        "cell_id", "mnc", "tac", "pci", "acc_m"
+    );
+    let dash = || "-".to_string();
+    for row in rows {
+        let id = if row.area_estimate { "area est.".into() } else { row.cell_id.to_string() };
+        println!(
+            "{id:<12} {:>4} {:>7} {:>7}  {:<14} {:>4} {:>7}  {}",
+            row.mnc,
+            row.tac_id,
+            row.channel.map_or_else(dash, |c| c.to_string()),
+            row.band.clone().unwrap_or_else(dash),
+            row.pci.map_or_else(dash, |p| p.to_string()),
+            row.acc.map_or_else(dash, |a| a.to_string()),
+            row.loc.as_ref().map_or_else(|| "not found".to_string(), osm),
+        );
+    }
 }
 
 fn osm(Location { lat, lon, .. }: &Location) -> String {
