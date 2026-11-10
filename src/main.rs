@@ -15,19 +15,20 @@ mod coverage;
 mod db;
 mod fetch;
 mod geojson;
+mod gsm;
 mod heatmap;
 mod lookup;
 mod raw;
 mod terrain;
 mod wifi;
 
-use crate::cells::{explore_cells, radio_value, CONCURRENT_PARTS, SENTINEL_CELL_ID};
+use crate::cells::{explore_cells, radio_value, Radio, CONCURRENT_PARTS};
 use crate::cli::{Cli, Command, ExploreSource};
 use crate::coverage::{lte_band, nr_arfcn_mhz};
 use crate::db::{database_url, lazy_pool, migrate_when_reachable};
 use crate::fetch::{AppleWPSClient, Location};
 use crate::heatmap::heatmap_document;
-use crate::protobuf::{CellTower, NrCellTower};
+use crate::protobuf::{CellTower, GsmCellTower, NrCellTower};
 use crate::wifi::explore_wifi;
 
 pub mod protobuf {
@@ -77,8 +78,37 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Cell { mcc, mnc, tacid, cellid, raw, nr } => {
-            let rows: Vec<CellRow> = if nr {
+        Command::Cell { mcc, mnc, tacid, cellid, raw, nr, gsm } => {
+            let rows: Vec<CellRow> = if gsm {
+                let Ok(cell_id) = u32::try_from(cellid) else {
+                    anyhow::bail!("cell ID {cellid} is longer than 32 bits, too long for GSM");
+                };
+                let request = GsmCellTower {
+                    mcc,
+                    mnc,
+                    cell_id,
+                    lac: tacid,
+                    location: None,
+                    unknown_11: None,
+                    unknown_12: None,
+                };
+                if raw {
+                    print!("{}", raw::summarize(&client.query_gsm_cell_raw(request).await?));
+                    return Ok(());
+                }
+                client.query_gsm_cells(vec![request]).await?.into_iter().map(|(cell, loc)| CellRow {
+                    area_estimate: false,
+                    cell_id: cell.cell_id.into(),
+                    mnc: cell.mnc,
+                    tac_id: cell.lac,
+                    // undocumented; shown as they come
+                    channel: radio_value(cell.unknown_11),
+                    band: radio_value(cell.unknown_12).map(|v| v.to_string()),
+                    pci: None,
+                    acc: cell.location.and_then(|l| l.horizontal_accuracy),
+                    loc,
+                }).collect()
+            } else if nr {
                 let request = NrCellTower {
                     mcc,
                     mnc,
@@ -126,7 +156,7 @@ async fn main() -> Result<()> {
                 client.query_cell(request).await?.into_iter().map(|(cell, loc)| {
                     let channel = radio_value(cell.uarfcn);
                     CellRow {
-                        area_estimate: cell.cell_id == SENTINEL_CELL_ID,
+                        area_estimate: cell.cell_id == u32::MAX,
                         cell_id: cell.cell_id.into(),
                         mnc: cell.mnc,
                         tac_id: cell.tac_id,
@@ -139,14 +169,22 @@ async fn main() -> Result<()> {
                 }).collect()
             };
             println!("cellid: {cellid}");
-            print_cells(&rows, if nr { ("nrarfcn", "frequency") } else { ("earfcn", "band") });
+            let columns = if gsm {
+                ("lac", "f11", "field 12")
+            } else if nr {
+                ("tac", "nrarfcn", "frequency")
+            } else {
+                ("tac", "earfcn", "band")
+            };
+            print_cells(&rows, columns);
         }
 
-        Command::Heatmap { mcc, mnc, tac_id, cell_id, radius_km, geojson, model, out, online, no_fetch } => {
+        Command::Heatmap { mcc, mnc, tac_id, cell_id, radius_km, geojson, model, out, online, no_fetch, gsm, nr } => {
             let key = (mcc, mnc, tac_id, cell_id);
+            let radio = if gsm { Radio::Gsm } else if nr { Radio::Nr } else { Radio::Lte };
             let pool = if online { None } else { Some(lazy_pool(1)?) };
             let pool = pool.as_ref().ok_or("database not used");
-            let (rows, source) = lookup::heatmap_rows(&client, pool, key, radius_km, !no_fetch).await?;
+            let (rows, source) = lookup::heatmap_rows(&client, pool, key, radio, radius_km, !no_fetch).await?;
             match &source {
                 lookup::Source::Database => {}
                 lookup::Source::Fetched(found) => {
@@ -158,8 +196,11 @@ async fn main() -> Result<()> {
             }
             let extension = if geojson { "geojson" } else { "html" };
             let path =
-                out.unwrap_or_else(|| format!("cell-{mcc}-{mnc}-{tac_id}-{cell_id}.{extension}"));
-            let (document, neighbours) = heatmap_document(key, rows, &model, geojson, &source).await?;
+                out.unwrap_or_else(|| {
+                    let prefix = if radio == Radio::Lte { String::new() } else { format!("{}-", radio.as_str()) };
+                    format!("cell-{prefix}{mcc}-{mnc}-{tac_id}-{cell_id}.{extension}")
+                });
+            let (document, neighbours) = heatmap_document(key, radio, rows, &model, geojson, &source).await?;
             std::fs::write(&path, document)?;
             println!("wrote {path} ({neighbours} nearby cells)");
         }
@@ -208,8 +249,8 @@ struct CellRow {
 }
 
 /// The `cell` command's output: the asked cell's location, then every entry of the reply.
-/// `columns` names the channel and band columns.
-fn print_cells(rows: &[CellRow], (channel, band): (&str, &str)) {
+/// `columns` names the area (TAC or LAC), channel and band columns.
+fn print_cells(rows: &[CellRow], (area, channel, band): (&str, &str, &str)) {
     if let Some(CellRow { loc: Some(loc), .. }) = rows.first() {
         println!("{}", osm(loc));
         println!("{} entries in reply", rows.len());
@@ -217,8 +258,8 @@ fn print_cells(rows: &[CellRow], (channel, band): (&str, &str)) {
         println!("not found")
     }
     println!(
-        "{:<12} {:>4} {:>7} {channel:>7}  {band:<14} {:>4} {:>7}  location",
-        "cell_id", "mnc", "tac", "pci", "acc_m"
+        "{:<12} {:>4} {area:>7} {channel:>7}  {band:<14} {:>4} {:>7}  location",
+        "cell_id", "mnc", "pci", "acc_m"
     );
     let dash = || "-".to_string();
     for row in rows {

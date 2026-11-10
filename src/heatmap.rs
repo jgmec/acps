@@ -9,7 +9,7 @@ use h3o::Resolution;
 use serde_json::json;
 use sqlx::PgPool;
 
-use crate::cells::CellKey;
+use crate::cells::{CellKey, Radio};
 use crate::cli::ModelArgs;
 use crate::geojson::{accuracy_circle, cell_geojson};
 use crate::{coverage, lookup, terrain};
@@ -45,19 +45,20 @@ pub(crate) struct NearbyCell {
     pub(crate) generated: String,
 }
 
-/// The cell (if crawled) and the nearest crawled cells of its operator, nearest first.
-pub(crate) async fn nearby_from_db(pool: &PgPool, key: CellKey, radius_km: f64) -> Result<Vec<NearbyCell>> {
+/// The cell (if crawled) and the nearest crawled cells of its operator and radio type,
+/// nearest first.
+pub(crate) async fn nearby_from_db(pool: &PgPool, key: CellKey, radio: Radio, radius_km: f64) -> Result<Vec<NearbyCell>> {
     let (mcc, mnc, tac_id, cell_id) = key;
     Ok(sqlx::query_as(
         "with t as (select geom from cell \
-                    where mcc = $1 and mnc = $2 and tac_id = $3 and cell_id = $4) \
+                    where mcc = $1 and mnc = $2 and tac_id = $3 and cell_id = $4 and radio = $7) \
          select c.tac_id, c.cell_id, ST_Y(c.geom::geometry) as lat, ST_X(c.geom::geometry) as lon, \
                 c.acc, c.earfcn, c.pci, c.unknown_12, ST_Distance(c.geom, t.geom) as distance_m, \
                 to_char(c.crawled_at at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') as crawled_at, \
                 degrees(ST_Azimuth(t.geom, c.geom)) as bearing_deg, \
                 to_char(now(), 'YYYY-MM-DD HH24:MI TZ') as generated \
          from cell c, t \
-         where c.mcc = $1 and c.mnc = $2 and ST_DWithin(c.geom, t.geom, $5) \
+         where c.mcc = $1 and c.mnc = $2 and c.radio = $7 and ST_DWithin(c.geom, t.geom, $5) \
          order by ST_Distance(c.geom, t.geom), c.cell_id \
          limit $6",
     )
@@ -67,6 +68,7 @@ pub(crate) async fn nearby_from_db(pool: &PgPool, key: CellKey, radius_km: f64) 
     .bind(cell_id)
     .bind(radius_km * 1000.0)
     .bind(HEATMAP_MAX_CELLS)
+    .bind(radio.as_str())
     .fetch_all(pool)
     .await?)
 }
@@ -76,6 +78,7 @@ pub(crate) async fn nearby_from_db(pool: &PgPool, key: CellKey, radius_km: f64) 
 /// number of nearby cells in it.
 pub(crate) async fn heatmap_document(
     key: CellKey,
+    radio: Radio,
     mut rows: Vec<NearbyCell>,
     model: &ModelArgs,
     geojson: bool,
@@ -84,10 +87,12 @@ pub(crate) async fn heatmap_document(
     let (mcc, mnc, tac_id, cell_id) = key;
 
     // estimated from all of the operator's nearby cells, every frequency: a site's sectors
-    // use several bands
-    let sites: Vec<_> = rows.iter().map(|c| (c.cell_id >> 8, c.pci, c.lat, c.lon)).collect();
-    for (c, azimuth) in rows.iter_mut().zip(coverage::estimate_azimuths(&sites)) {
-        c.azimuth_deg = azimuth.map(|a| a.round());
+    // use several bands. LTE only: GSM / UMTS cell IDs have no standard site/sector split
+    if radio == Radio::Lte {
+        let sites: Vec<_> = rows.iter().map(|c| (c.cell_id >> 8, c.pci, c.lat, c.lon)).collect();
+        for (c, azimuth) in rows.iter_mut().zip(coverage::estimate_azimuths(&sites)) {
+            c.azimuth_deg = azimuth.map(|a| a.round());
+        }
     }
 
     let cell_json = |c: &NearbyCell| {
@@ -103,14 +108,14 @@ pub(crate) async fn heatmap_document(
     };
     let nearby: Vec<&NearbyCell> = rows.iter().filter(|c| !is_target(c)).collect();
     let terrain = match model.terrain {
-        true => Some(terrain_losses(target, &nearby, model).await?),
+        true => Some(terrain_losses(target, &nearby, model, radio).await?),
         false => None,
     };
     let terrain_map = terrain.as_ref().map(|(_, map)| map.clone()).unwrap_or_default();
 
     if geojson {
         let accuracy = target.acc.filter(|&a| a > 0).map(|a| accuracy_circle(target.lat, target.lon, a as f64));
-        let coverage = model_coverage(target, &nearby, model, &terrain_map)?;
+        let coverage = model_coverage(target, &nearby, model, radio, &terrain_map)?;
         let mut geojson = cell_geojson(mcc, mnc, target, &nearby, accuracy, &coverage)?;
         // where the data came from, and whether it was saved
         if let Some(cell) = geojson["features"]
@@ -119,6 +124,7 @@ pub(crate) async fn heatmap_document(
         {
             cell["properties"]["source"] = json!(source.name());
             cell["properties"]["saved"] = json!(source.saved());
+            cell["properties"]["radio"] = json!(radio.as_str());
         }
         return Ok((geojson.to_string(), nearby.len()));
     }
@@ -128,6 +134,8 @@ pub(crate) async fn heatmap_document(
         "cells": nearby.iter().map(|c| cell_json(c)).collect::<Vec<_>>(),
         "generated": target.generated,
         "note": source.note(),
+        // "lte", or "gsm" for 2G/3G cells (LAC instead of TAC, links under /gsm/)
+        "radio": radio.as_str(),
         // the map's initial propagation model; it can be switched on the page
         "propagation": model.propagation.name(),
         // diffraction loss per cell as base64 bytes of 0.25 dB steps, over a square frame
@@ -169,6 +177,7 @@ pub(crate) async fn terrain_losses(
     target: &NearbyCell,
     nearby: &[&NearbyCell],
     model: &ModelArgs,
+    radio: Radio,
 ) -> Result<(f64, TerrainMap)> {
     let same = |c: &&&NearbyCell| target.earfcn.is_some() && c.earfcn == target.earfcn;
     let mut chosen: Vec<&NearbyCell> = vec![target];
@@ -178,7 +187,7 @@ pub(crate) async fn terrain_losses(
     // the frame: the larger of the two models' areas, with the same-channel competitors
     let mut competitors = vec![target];
     competitors.extend(nearby.iter().filter(same).copied());
-    let cells = model_cells(&competitors, &TerrainMap::new());
+    let cells = model_cells(&competitors, radio, &TerrainMap::new());
     let mut params = model_params(model)?;
     let mut half_width_m: f64 = 0.0;
     for propagation in [coverage::Propagation::Hata, coverage::Propagation::Simple] {
@@ -203,7 +212,7 @@ pub(crate) async fn terrain_losses(
     let dem = terrain::Dem::load(&dem_dir(), south - margin, north + margin, west - margin, east + margin).await?;
 
     // cells without a known frequency use the mapped cell's, or 1800 MHz
-    let fallback_mhz = target.earfcn.and_then(coverage::downlink_mhz).unwrap_or(1800.0);
+    let fallback_mhz = channel_mhz(radio, target.earfcn).unwrap_or(1800.0);
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     let losses: Vec<((i32, i64), terrain::TerrainLoss)> = tokio::task::block_in_place(|| {
         std::thread::scope(|scope| {
@@ -215,7 +224,7 @@ pub(crate) async fn terrain_losses(
                         chunk
                             .iter()
                             .map(|c| {
-                                let mhz = c.earfcn.and_then(coverage::downlink_mhz).unwrap_or(fallback_mhz);
+                                let mhz = channel_mhz(radio, c.earfcn).unwrap_or(fallback_mhz);
                                 let loss = terrain::diffraction_loss(dem, frame, c.lat, c.lon, mhz, TERRAIN_SIZE);
                                 ((c.tac_id, c.cell_id), loss)
                             })
@@ -243,7 +252,18 @@ pub(crate) struct ModelledCoverage<'a> {
 /// Terrain loss of the cells it was computed for, by (TAC, cell ID).
 pub(crate) type TerrainMap = HashMap<(i32, i64), std::sync::Arc<terrain::TerrainLoss>>;
 
-pub(crate) fn model_cells(cells: &[&NearbyCell], terrain: &TerrainMap) -> Vec<coverage::ModelCell> {
+/// Downlink frequency in MHz of a channel: an EARFCN for LTE, an NR-ARFCN for 5G; GSM
+/// cells have none.
+pub(crate) fn channel_mhz(radio: Radio, channel: Option<i32>) -> Option<f64> {
+    let channel = channel?;
+    match radio {
+        Radio::Lte => coverage::downlink_mhz(channel),
+        Radio::Nr => coverage::nr_arfcn_mhz(channel),
+        Radio::Gsm => None,
+    }
+}
+
+pub(crate) fn model_cells(cells: &[&NearbyCell], radio: Radio, terrain: &TerrainMap) -> Vec<coverage::ModelCell> {
     cells
         .iter()
         .map(|c| coverage::ModelCell {
@@ -253,6 +273,7 @@ pub(crate) fn model_cells(cells: &[&NearbyCell], terrain: &TerrainMap) -> Vec<co
             reach: c.unknown_12,
             azimuth_deg: c.azimuth_deg,
             earfcn: c.earfcn,
+            mhz: channel_mhz(radio, c.earfcn),
             terrain: terrain.get(&(c.tac_id, c.cell_id)).cloned(),
         })
         .collect()
@@ -277,6 +298,7 @@ pub(crate) fn model_coverage<'a>(
     target: &'a NearbyCell,
     nearby: &[&'a NearbyCell],
     model: &ModelArgs,
+    radio: Radio,
     terrain: &TerrainMap,
 ) -> Result<ModelledCoverage<'a>> {
     let same_frequency_only = !model.all_frequencies && target.earfcn.is_some();
@@ -286,7 +308,7 @@ pub(crate) fn model_coverage<'a>(
             .iter()
             .filter(|c| !same_frequency_only || c.earfcn == target.earfcn),
     );
-    let cells = model_cells(&competitors, terrain);
+    let cells = model_cells(&competitors, radio, terrain);
     let params = model_params(model)?;
     let levels = &model.contour_levels;
     if model.contours
@@ -325,7 +347,7 @@ mod tests {
     #[tokio::test]
     async fn geojson_document() {
         let (document, neighbours) =
-            heatmap_document(KEY, rows(), &default_model(), true, &Source::Online("no database")).await.unwrap();
+            heatmap_document(KEY, Radio::Lte, rows(), &default_model(), true, &Source::Online("no database")).await.unwrap();
         assert_eq!(neighbours, 2);
         let json: serde_json::Value = serde_json::from_str(&document).unwrap();
         let features = json["features"].as_array().unwrap();
@@ -343,7 +365,7 @@ mod tests {
     async fn html_document_embeds_the_data() {
         let mut model = default_model();
         model.propagation = coverage::Propagation::Simple;
-        let (html, _) = heatmap_document(KEY, rows(), &model, false, &Source::Database).await.unwrap();
+        let (html, _) = heatmap_document(KEY, Radio::Lte, rows(), &model, false, &Source::Database).await.unwrap();
         assert!(!html.contains("/*DATA*/null"));
         let start = html.find("const DATA = ").unwrap() + "const DATA = ".len();
         let end = start + html[start..].find(";\n").unwrap();
@@ -358,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn document_without_the_cell_fails() {
         let rows: Vec<_> = rows().into_iter().filter(|r| r.cell_id != 451645).collect();
-        assert!(heatmap_document(KEY, rows, &default_model(), true, &Source::Database).await.is_err());
+        assert!(heatmap_document(KEY, Radio::Lte, rows, &default_model(), true, &Source::Database).await.is_err());
     }
 
     #[test]
@@ -368,10 +390,10 @@ mod tests {
         model.contours = true;
         for levels in [vec![], vec![0.5, 0.1], vec![0.0, 0.5], vec![0.5, 1.0]] {
             model.contour_levels = levels.clone();
-            assert!(model_coverage(target, &[], &model, &TerrainMap::new()).is_err(), "{levels:?}");
+            assert!(model_coverage(target, &[], &model, Radio::Lte, &TerrainMap::new()).is_err(), "{levels:?}");
         }
         model.contour_levels = vec![0.25, 0.75];
-        assert!(model_coverage(target, &[], &model, &TerrainMap::new()).is_ok());
+        assert!(model_coverage(target, &[], &model, Radio::Lte, &TerrainMap::new()).is_ok());
     }
 
     #[test]
@@ -382,10 +404,10 @@ mod tests {
         other_band.earfcn = Some(6300);
         let nearby = [&rows[1], &rows[2], &other_band];
         let model = default_model();
-        let only = model_coverage(&rows[0], &nearby, &model, &TerrainMap::new()).unwrap();
+        let only = model_coverage(&rows[0], &nearby, &model, Radio::Lte, &TerrainMap::new()).unwrap();
         assert!(only.same_frequency_only);
         assert_eq!(only.competitors.len(), 3);
-        let all = model_coverage(&rows[0], &nearby, &ModelArgs { all_frequencies: true, ..model }, &TerrainMap::new()).unwrap();
+        let all = model_coverage(&rows[0], &nearby, &ModelArgs { all_frequencies: true, ..model }, Radio::Lte, &TerrainMap::new()).unwrap();
         assert_eq!(all.competitors.len(), 4);
     }
 }

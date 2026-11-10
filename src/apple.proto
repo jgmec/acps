@@ -10,6 +10,12 @@ message WifiDevice {
 }
 
 message AppleWLoc {
+  // 2G GSM and 3G UMTS cells: the same field for requests and replies. A reply holds only
+  // the asked cells, without nearby cells or tracking-area estimates. Found by trying
+  // request fields. (Field 27, answered in 23, has the same shape but is still unidentified:
+  // 3G cells aren't found there.)
+  repeated GsmCellTower gsm_cell_towers = 1;
+
   repeated WifiDevice wifi_devices = 2;
 
   repeated CellTower cell_tower_response = 22;
@@ -28,6 +34,20 @@ message CellTower {
   optional Location location = 5;
   optional uint32 uarfcn = 6;
   optional uint32 pid = 7;
+}
+
+// A 2G GSM or 3G UMTS cell: location area code (LAC) and cell ID: 16 bits (CI) for GSM,
+// the full 28 bits for UMTS (RNC x 65536 + CID; the short CID alone isn't found). Fields 11
+// and 12 are echoed as -1 for an unknown cell and were absent for known ones; they may be
+// the channel and BSIC (GSM) or scrambling code (UMTS), unconfirmed.
+message GsmCellTower {
+  uint32 mcc = 1;
+  uint32 mnc = 2;
+  uint32 cell_id = 3;
+  uint32 lac = 4;
+  optional Location location = 5;
+  optional uint32 unknown_11 = 11;
+  optional uint32 unknown_12 = 12;
 }
 
 // A 5G NR cell: like CellTower, but with a 64-bit cell identity (NCI, 36 bits) and an

@@ -5,6 +5,8 @@
 //! default Okumura-Hata model to the distance-only one; `?terrain=true` adds diffraction loss
 //! from hills and ridges (elevation tiles are downloaded on first use). When the database can't be reached the
 //! map is built from Apple's replies without saving; `X-Wtfps-Source` says which happened.
+//! `GET /gsm/{mcc}/{mnc}/{lac}/{cell}/heatmap` does the same for 2G GSM / 3G UMTS cells, and
+//! `GET /nr/{mcc}/{mnc}/{tac}/{cell}/heatmap` for 5G NR cells.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +24,7 @@ use sqlx::PgPool;
 
 use clap::ValueEnum;
 
+use crate::cells::{CellKey, Radio};
 use crate::coverage::Propagation;
 use crate::fetch::AppleWPSClient;
 use crate::lookup::{self, NotFound, Source};
@@ -46,6 +49,8 @@ pub async fn serve(
 ) -> Result<()> {
     let app = Router::new()
         .route("/cells/{mcc}/{mnc}/{tac}/{cell}/heatmap", get(heatmap))
+        .route("/gsm/{mcc}/{mnc}/{lac}/{cell}/heatmap", get(gsm_heatmap))
+        .route("/nr/{mcc}/{mnc}/{tac}/{cell}/heatmap", get(nr_heatmap))
         .with_state(AppState { client, pool, schema_ready });
     let listener = tokio::net::TcpListener::bind(listen).await?;
     info!("listening on http://{}", listener.local_addr()?);
@@ -58,6 +63,26 @@ async fn heatmap(
     Path(key): Path<(i32, i32, i32, i64)>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
+    heatmap_response(state, key, Radio::Lte, query).await
+}
+
+async fn gsm_heatmap(
+    State(state): State<AppState>,
+    Path(key): Path<(i32, i32, i32, i64)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    heatmap_response(state, key, Radio::Gsm, query).await
+}
+
+async fn nr_heatmap(
+    State(state): State<AppState>,
+    Path(key): Path<(i32, i32, i32, i64)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    heatmap_response(state, key, Radio::Nr, query).await
+}
+
+async fn heatmap_response(state: AppState, key: CellKey, radio: Radio, query: HashMap<String, String>) -> Response {
     let (geojson, model) = match parse_query(&query) {
         Ok(parsed) => parsed,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
@@ -68,7 +93,7 @@ async fn heatmap(
         false => Err("database unavailable"),
     };
     let (rows, source) =
-        match lookup::heatmap_rows(&state.client, pool, key, DEFAULT_RADIUS_KM, true).await {
+        match lookup::heatmap_rows(&state.client, pool, key, radio, DEFAULT_RADIUS_KM, true).await {
             Ok(found) => found,
             Err(e) => return error_response(e),
         };
@@ -76,7 +101,7 @@ async fn heatmap(
         info!("cell {key:?} wasn't crawled yet: fetched it from Apple and saved {found} cells");
     }
 
-    match heatmap_document(key, rows, &model, geojson, &source).await {
+    match heatmap_document(key, radio, rows, &model, geojson, &source).await {
         Ok((document, _)) => {
             let content_type = if geojson { "application/geo+json" } else { "text/html; charset=utf-8" };
             // database, fetched (from Apple and saved) or online (from Apple, not saved)

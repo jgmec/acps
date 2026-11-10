@@ -7,7 +7,7 @@ use mac_address::MacAddress;
 use prost::Message;
 use tryhard::retry_fn;
 
-use crate::protobuf::{AppleWLoc, CellTower, NrCellTower, WifiDevice};
+use crate::protobuf::{AppleWLoc, CellTower, GsmCellTower, NrCellTower, WifiDevice};
 
 /// Apple's location service, and its server for China (`--china`).
 const APPLE_URL: &str = "https://gs-loc.apple.com/clls/wloc";
@@ -17,32 +17,17 @@ const APPLE_CHINA_URL: &str = "https://gs-loc-cn.apple.com/clls/wloc";
 pub struct AppleWPSClient {
     client: reqwest::Client,
     url: String,
-    /// a new connection for every request (going through a proxy)
-    new_connections: bool,
 }
 
 impl AppleWPSClient {
     /// Apple's server, or with `china` its server for China; WTFPS_APPLE_URL and
     /// WTFPS_APPLE_CHINA_URL (environment or .env) replace them, e.g. for a proxy.
-    ///
-    /// Connections to Apple are kept open and reused. With any other URL (a proxy), each
-    /// request gets a new connection instead: some proxies (e.g. Squid as a reverse proxy)
-    /// stop answering requests sent over a reused connection, and the crawler then gets
-    /// only timeouts.
     pub fn new(china: bool) -> Self {
         let (variable, default) =
             if china { ("WTFPS_APPLE_CHINA_URL", APPLE_CHINA_URL) } else { ("WTFPS_APPLE_URL", APPLE_URL) };
-        let url = dotenvy::var(variable).ok().filter(|u| !u.is_empty()).unwrap_or_else(|| default.into());
-        let new_connections = url != default;
-        let mut builder = reqwest::Client::builder();
-        if new_connections {
-            info!("using {url}: a new connection for every request");
-            builder = builder.pool_max_idle_per_host(0);
-        }
         Self {
-            client: builder.build().expect("HTTP client settings are valid"),
-            url,
-            new_connections,
+            client: reqwest::Client::new(),
+            url: dotenvy::var(variable).ok().filter(|u| !u.is_empty()).unwrap_or_else(|| default.into()),
         }
     }
 
@@ -71,12 +56,9 @@ impl AppleWPSClient {
 
         let resp = retry_fn(|| {
             let payload = payload.clone();
-            let mut req = self.client.post(&self.url);
-            if self.new_connections {
-                // tell the proxy too, so neither side waits on the old connection
-                req = req.header("connection", "close");
-            }
-            let req = req
+            let req = self
+                .client
+                .post(&self.url)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .header("accept", "*/*")
                 .header("accept-charset", "utf-8")
@@ -162,6 +144,19 @@ impl AppleWPSClient {
     pub async fn query_nr_cell_raw(&self, cell: NrCellTower) -> Result<Vec<u8>> {
         self.query_raw(AppleWLoc { nr_cell_tower_request: vec![cell], ..Default::default() }).await
     }
+
+    /// 2G GSM / 3G UMTS cells, any number in one request (wtfps sends up to 500). Apple
+    /// returns only the asked cells, without nearby cells.
+    pub async fn query_gsm_cells(&self, cells: Vec<GsmCellTower>) -> Result<Vec<(GsmCellTower, Option<Location>)>> {
+        debug!("querying {} GSM cells", cells.len());
+        let reply = self.query(AppleWLoc { gsm_cell_towers: cells, ..Default::default() }).await?;
+        Ok(reply.gsm_cell_towers.into_iter().map(|c| (c, c.location.and_then(Location::from_raw))).collect())
+    }
+
+    /// Raw reply for a 2G GSM cell request.
+    pub async fn query_gsm_cell_raw(&self, cell: GsmCellTower) -> Result<Vec<u8>> {
+        self.query_raw(AppleWLoc { gsm_cell_towers: vec![cell], ..Default::default() }).await
+    }
 }
 
 pub struct Location {
@@ -226,6 +221,19 @@ mod tests {
         let decoded = AppleWLoc::decode(bytes.as_slice()).unwrap();
         assert_eq!(decoded.nr_cell_tower_request[0].cell_id, 17_248_763_906);
         assert!(decoded.cell_tower_request.is_empty());
+    }
+
+    #[test]
+    fn gsm_requests_use_field_1() {
+        use prost::Message;
+        let cell = protobuf::GsmCellTower { mcc: 284, mnc: 1, cell_id: 9935, lac: 1400, ..Default::default() };
+        let bytes = AppleWLoc { gsm_cell_towers: vec![cell], ..Default::default() }.encode_to_vec();
+        // top-level field 1, length-delimited; inside: 1 = mcc, 2 = mnc, 3 = cell ID, 4 = LAC
+        assert_eq!(bytes[0], 0x0a);
+        let decoded = AppleWLoc::decode(bytes.as_slice()).unwrap();
+        let cell = &decoded.gsm_cell_towers[0];
+        assert_eq!((cell.mcc, cell.mnc, cell.cell_id, cell.lac), (284, 1, 9935, 1400));
+        assert!(decoded.cell_tower_request.is_empty() && decoded.nr_cell_tower_request.is_empty());
     }
 
     #[test]

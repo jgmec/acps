@@ -9,15 +9,81 @@ use h3o::{LatLng, Resolution};
 use sqlx::PgPool;
 
 use crate::fetch::{AppleWPSClient, Location};
-use crate::protobuf::CellTower;
+use crate::protobuf::{CellTower, GsmCellTower, NrCellTower};
 
 pub(crate) const CONCURRENT_PARTS: usize = 8;
 
-pub(crate) const SENTINEL_CELL_ID: u32 = u32::MAX;
+/// Cell ID of Apple's tracking-area estimates, which aren't cells (-1: u32::MAX in LTE
+/// replies, u64::MAX in 5G ones; both become this in a `ReplyCell`).
+pub(crate) const SENTINEL_CELL_ID: u64 = u64::MAX;
 
 pub(crate) type CellKey = (i32, i32, i32, i64);
 
 pub(crate) type CellArea = (i32, i32, i64);
+
+/// Which of Apple's cell formats a cell came from; stored in the `radio` column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Radio {
+    /// LTE (request field 25, reply field 22)
+    Lte,
+    /// 5G NR (request field 29, reply field 24); the `earfcn` column holds the NR-ARFCN
+    Nr,
+    /// 2G GSM and 3G UMTS (field 1); the cell's TAC column holds its LAC
+    Gsm,
+}
+
+impl Radio {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Radio::Lte => "lte",
+            Radio::Nr => "nr",
+            Radio::Gsm => "gsm",
+        }
+    }
+
+    pub(crate) fn from_str(name: &str) -> Option<Self> {
+        match name {
+            "lte" => Some(Radio::Lte),
+            "nr" => Some(Radio::Nr),
+            "gsm" => Some(Radio::Gsm),
+            _ => None,
+        }
+    }
+}
+
+/// A cell in one of Apple's replies, whatever its radio: the identity fields every format
+/// shares, the channel (EARFCN for LTE, NR-ARFCN for 5G, none for GSM) and the PCI; its
+/// decoded location travels next to it. Apple's "unknown" (-1) channel or PCI is kept as
+/// u32::MAX; see `radio_value`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReplyCell {
+    pub(crate) mcc: u32,
+    pub(crate) mnc: u32,
+    /// TAC, or the LAC for GSM
+    pub(crate) tac_id: u32,
+    pub(crate) cell_id: u64,
+    pub(crate) channel: Option<u32>,
+    pub(crate) pci: Option<u32>,
+}
+
+impl From<CellTower> for ReplyCell {
+    fn from(c: CellTower) -> Self {
+        let cell_id = if c.cell_id == u32::MAX { SENTINEL_CELL_ID } else { c.cell_id.into() };
+        ReplyCell { mcc: c.mcc, mnc: c.mnc, tac_id: c.tac_id, cell_id, channel: c.uarfcn, pci: c.pid }
+    }
+}
+
+impl From<NrCellTower> for ReplyCell {
+    fn from(c: NrCellTower) -> Self {
+        ReplyCell { mcc: c.mcc, mnc: c.mnc, tac_id: c.tac_id, cell_id: c.cell_id, channel: c.nrarfcn, pci: c.pid }
+    }
+}
+
+impl From<GsmCellTower> for ReplyCell {
+    fn from(c: GsmCellTower) -> Self {
+        ReplyCell { mcc: c.mcc, mnc: c.mnc, tac_id: c.lac, cell_id: c.cell_id.into(), channel: None, pci: None }
+    }
+}
 
 /// One H3 area (~5 km²) per operator is crawled; a single cell request returns
 /// its neighbours, so querying every discovered cell would mostly return known cells.
@@ -25,13 +91,8 @@ pub(crate) const CELL_CRAWL_RES: Resolution = Resolution::Seven;
 
 pub(crate) const CELL_BATCH: i64 = 256;
 
-pub(crate) fn cell_key(cell: &CellTower) -> CellKey {
-    (
-        cell.mcc as i32,
-        cell.mnc as i32,
-        cell.tac_id as i32,
-        cell.cell_id as i64,
-    )
+pub(crate) fn cell_key(cell: &ReplyCell) -> CellKey {
+    (cell.mcc as i32, cell.mnc as i32, cell.tac_id as i32, cell.cell_id as i64)
 }
 
 /// EARFCN / PCI as reported by Apple; u32::MAX (-1) means unknown
@@ -43,61 +104,63 @@ pub(crate) fn cell_area(lat: f64, lon: f64) -> Result<i64> {
     Ok(u64::from(LatLng::new(lat, lon)?.to_cell(CELL_CRAWL_RES)) as i64)
 }
 
-pub(crate) type CellReply = Vec<(CellTower, Option<Location>)>;
+pub(crate) type CellReply = Vec<(ReplyCell, Option<Location>)>;
 
-/// Query cells concurrently; each key is returned with its own result.
-pub(crate) async fn query_cells(client: &AppleWPSClient, keys: &[CellKey]) -> Vec<(CellKey, Result<CellReply>)> {
-    let requests: Vec<_> = keys
-        .iter()
-        .map(|&key @ (mcc, mnc, tac_id, cell_id)| {
-            let request = (|| {
-                Ok(CellTower {
-                    mcc: u32::try_from(mcc)?,
-                    mnc: u32::try_from(mnc)?,
-                    tac_id: u32::try_from(tac_id)?,
-                    cell_id: u32::try_from(cell_id)?,
-                    location: None,
-                    uarfcn: None,
-                    pid: None,
-                })
-            })();
-            async move {
-                let result = match request {
-                    Ok(cell) => client.query_cell(cell).await,
-                    Err(e) => Err(e),
-                };
-                (key, result)
-            }
-        })
-        .collect();
+/// Ask Apple for one LTE or 5G NR cell; the reply brings its nearby cells of the same radio.
+async fn query_cell(client: &AppleWPSClient, radio: Radio, (mcc, mnc, tac_id, cell_id): CellKey) -> Result<CellReply> {
+    let (mcc, mnc, tac_id) = (u32::try_from(mcc)?, u32::try_from(mnc)?, u32::try_from(tac_id)?);
+    match radio {
+        Radio::Lte => {
+            let cell = CellTower { mcc, mnc, tac_id, cell_id: u32::try_from(cell_id)?, location: None, uarfcn: None, pid: None };
+            Ok(client.query_cell(cell).await?.into_iter().map(|(c, loc)| (c.into(), loc)).collect())
+        }
+        Radio::Nr => {
+            let cell = NrCellTower { mcc, mnc, tac_id, cell_id: u64::try_from(cell_id)?, location: None, nrarfcn: None, pid: None };
+            Ok(client.query_nr_cell(cell).await?.into_iter().map(|(c, loc)| (c.into(), loc)).collect())
+        }
+        Radio::Gsm => anyhow::bail!("GSM cells are asked for in blocks (see gsm.rs)"),
+    }
+}
 
-    stream::iter(requests)
-        .buffer_unordered(CONCURRENT_PARTS)
-        .collect()
-        .await
+/// Query LTE or 5G NR cells concurrently, one request each; each key is returned with its
+/// own result.
+pub(crate) async fn query_cells(client: &AppleWPSClient, radio: Radio, keys: &[CellKey]) -> Vec<(CellKey, Result<CellReply>)> {
+    // collected first: streaming straight from the iterator makes the futures not `Send`
+    // for every lifetime, which the HTTP API's handlers need
+    let requests: Vec<_> = keys.iter().map(|&key| async move { (key, query_cell(client, radio, key).await) }).collect();
+    stream::iter(requests).buffer_unordered(CONCURRENT_PARTS).collect().await
 }
 
 pub(crate) async fn explore_cells(client: &AppleWPSClient, pool: &PgPool, probe: bool) -> Result<()> {
     backfill_cell_areas(pool).await?;
 
     loop {
-        // user-seeded cells first, then one random known cell from each uncrawled area
-        let mut todo: Vec<CellKey> =
-            sqlx::query_as("select mcc, mnc, tac_id, cell_id from cell_todo limit $1")
-                .bind(CELL_BATCH)
-                .fetch_all(pool)
-                .await?;
+        // GSM / UMTS cells in their own small rounds (see gsm.rs), between LTE / 5G batches
+        let gsm_busy = crate::gsm::gsm_step(client, pool, probe).await?;
+
+        // user-seeded LTE and 5G cells first, then one random known cell from each uncrawled
+        // area (areas are per radio: an area crawled for LTE may still need it for 5G)
+        let seeds: Vec<(String, i32, i32, i32, i64)> = sqlx::query_as(
+            "select radio, mcc, mnc, tac_id, cell_id from cell_todo where radio in ('lte', 'nr') limit $1",
+        )
+        .bind(CELL_BATCH)
+        .fetch_all(pool)
+        .await?;
+        let mut todo: Vec<(Radio, CellKey)> = seeds
+            .into_iter()
+            .filter_map(|(radio, mcc, mnc, tac, cell)| Some((Radio::from_str(&radio)?, (mcc, mnc, tac, cell))))
+            .collect();
         let mut picked_areas = BTreeMap::new();
 
         if todo.is_empty() {
-            // (mcc, mnc, area, and the TAC and cell ID of a random known cell in it)
-            type Picked = (i32, i32, i64, Option<i32>, Option<i64>);
+            // (radio, mcc, mnc, area, and the TAC and cell ID of a random known cell in it)
+            type Picked = (String, i32, i32, i64, Option<i32>, Option<i64>);
             let picked: Vec<Picked> = sqlx::query_as(
-                "select a.mcc, a.mnc, a.area, c.tac_id, c.cell_id \
-                 from (select mcc, mnc, area from cell_crawl where last_crawled is null limit $1) a \
+                "select a.radio, a.mcc, a.mnc, a.area, c.tac_id, c.cell_id \
+                 from (select radio, mcc, mnc, area from cell_crawl where last_crawled is null limit $1) a \
                  left join lateral ( \
                      select tac_id, cell_id from cell \
-                     where cell.mcc = a.mcc and cell.mnc = a.mnc and cell.crawl_area = a.area \
+                     where cell.mcc = a.mcc and cell.mnc = a.mnc and cell.crawl_area = a.area and cell.radio = a.radio \
                      order by random() limit 1 \
                  ) c on true",
             )
@@ -107,51 +170,60 @@ pub(crate) async fn explore_cells(client: &AppleWPSClient, pool: &PgPool, probe:
             if picked.is_empty() {
                 // Apple returns the same fixed group of ~100 cells for every cell in it,
                 // so the area crawl can't leave a group; guessing nearby cell IDs can
-                if probe && probe_cells(client, pool).await? {
+                // (LTE only: 5G cell IDs split into site and sector differently per operator)
+                if probe && probe_cells(client, pool).await? || gsm_busy {
                     continue;
                 }
                 break;
             }
 
-            for (mcc, mnc, area, tac_id, cell_id) in picked {
-                if let (Some(tac_id), Some(cell_id)) = (tac_id, cell_id) {
-                    let key = (mcc, mnc, tac_id, cell_id);
-                    todo.push(key);
-                    picked_areas.insert(key, (mcc, mnc, area));
-                } else {
-                    sqlx::query("delete from cell_crawl where mcc = $1 and mnc = $2 and area = $3")
-                        .bind(mcc)
-                        .bind(mnc)
-                        .bind(area)
-                        .execute(pool)
-                        .await?;
+            for (radio_name, mcc, mnc, area, tac_id, cell_id) in picked {
+                match (Radio::from_str(&radio_name), tac_id, cell_id) {
+                    (Some(radio), Some(tac_id), Some(cell_id)) => {
+                        let key = (mcc, mnc, tac_id, cell_id);
+                        todo.push((radio, key));
+                        picked_areas.insert((radio, key), (mcc, mnc, area));
+                    }
+                    _ => {
+                        sqlx::query("delete from cell_crawl where mcc = $1 and mnc = $2 and area = $3 and radio = $4")
+                            .bind(mcc)
+                            .bind(mnc)
+                            .bind(area)
+                            .bind(&radio_name)
+                            .execute(pool)
+                            .await?;
+                    }
                 }
             }
         }
 
-        info!("making {} cell requests...", todo.len());
-        let mut queried = Vec::new();
-        let mut results = Vec::new();
-        for (key, resp) in query_cells(client, &todo).await {
-            match resp {
-                Ok(resp) => {
-                    queried.push(key);
-                    results.extend(resp);
+        let mut batches: BTreeMap<Radio, Vec<CellKey>> = BTreeMap::new();
+        for &(radio, key) in &todo {
+            batches.entry(radio).or_default().push(key);
+        }
+        let mut any_answered = false;
+        for (radio, keys) in batches {
+            info!("making {} {} cell requests...", keys.len(), radio.as_str());
+            let mut queried = Vec::new();
+            let mut results = Vec::new();
+            for (key, resp) in query_cells(client, radio, &keys).await {
+                match resp {
+                    Ok(resp) => {
+                        queried.push(key);
+                        results.extend(resp);
+                    }
+                    // failed cells stay queued and are retried in a later batch
+                    Err(e) => warn!("{} cell {key:?} failed: {e:#}", radio.as_str()),
                 }
-                // failed cells stay queued and are retried in a later batch
-                Err(e) => warn!("cell {key:?} failed: {e:#}"),
             }
+            any_answered |= !queried.is_empty();
+            let crawled = queried.iter().filter_map(|key| picked_areas.get(&(radio, *key)).copied()).collect();
+            commit_cells(pool, radio, &queried, crawled, results).await?;
         }
 
-        if queried.is_empty() && !todo.is_empty() {
+        if !any_answered && !todo.is_empty() {
             anyhow::bail!("all {} cell requests in batch failed", todo.len());
         }
-
-        let crawled = queried
-            .iter()
-            .filter_map(|key| picked_areas.get(key).copied())
-            .collect();
-        commit_cells(pool, &queried, crawled, results).await?;
     }
 
     Ok(())
@@ -162,21 +234,19 @@ pub(crate) type FoundCell = (Location, Option<i32>, Option<i32>);
 
 /// Cells from one or more replies: those with a location (merged when a cell appears in
 /// several replies) and those without one. Tracking-area estimates are dropped.
-pub(crate) fn merge_found(
-    results: Vec<(CellTower, Option<Location>)>,
-) -> (BTreeMap<CellKey, FoundCell>, BTreeSet<CellKey>) {
+pub(crate) fn merge_found(results: CellReply) -> (BTreeMap<CellKey, FoundCell>, BTreeSet<CellKey>) {
     let mut found: BTreeMap<CellKey, FoundCell> = BTreeMap::new();
     let mut not_found = BTreeSet::new();
     for (cell, loc) in results {
-        // Apple includes entries with cell_id u32::MAX (-1): per-TAC location estimates
-        // (~150km accuracy), not real cells, so don't store or crawl them.
+        // Apple includes entries with cell ID -1: per-TAC location estimates (149 km
+        // accuracy for LTE, 3 km for 5G), not real cells, so don't store or crawl them.
         if cell.cell_id == SENTINEL_CELL_ID {
             continue;
         }
         match loc {
             Some(loc) => {
                 // the same cell can appear in several replies; keep any radio details seen
-                let (earfcn, pci) = (radio_value(cell.uarfcn), radio_value(cell.pid));
+                let (earfcn, pci) = (radio_value(cell.channel), radio_value(cell.pci));
                 let entry = found.entry(cell_key(&cell)).or_insert((loc, None, None));
                 entry.1 = earfcn.or(entry.1);
                 entry.2 = pci.or(entry.2);
@@ -190,11 +260,16 @@ pub(crate) fn merge_found(
     (found, not_found)
 }
 
+/// Save the cells in LTE or 5G NR replies (`radio`): every found cell, the queried cells
+/// missing from them as not found, and the areas of the queried cells as crawled (`crawled`
+/// adds more); new areas are queued for the area crawl. GSM cells are saved by
+/// `gsm::commit_gsm_cells` instead.
 pub(crate) async fn commit_cells(
     pool: &PgPool,
+    radio: Radio,
     queried: &[CellKey],
     mut crawled: BTreeSet<CellArea>,
-    results: Vec<(CellTower, Option<Location>)>,
+    results: CellReply,
 ) -> Result<()> {
     let (found, mut not_found) = merge_found(results);
     // a queried cell missing from its own response is also not found
@@ -232,8 +307,9 @@ pub(crate) async fn commit_cells(
     areas.extend(crawled.iter().copied());
 
     info!(
-        "{} cells with location, {} not found, {} areas crawled",
+        "{} {} cells with location, {} not found, {} areas crawled",
         found.len(),
+        radio.as_str(),
         not_found.len(),
         crawled.len(),
     );
@@ -246,9 +322,9 @@ pub(crate) async fn commit_cells(
     // refreshed at most hourly, because the same cells come back in many replies and
     // rewriting every row each batch would be wasteful
     sqlx::query(
-        "insert into cell (mcc, mnc, tac_id, cell_id, geom, acc, crawl_area, earfcn, pci, \
+        "insert into cell (mcc, mnc, tac_id, cell_id, radio, geom, acc, crawl_area, earfcn, pci, \
                            unknown_11, unknown_12, altitude, vertical_acc) \
-         select mcc, mnc, tac_id, cell_id, ST_SetSRID(ST_MakePoint(lon, lat), 4326), acc, area, \
+         select mcc, mnc, tac_id, cell_id, $15, ST_SetSRID(ST_MakePoint(lon, lat), 4326), acc, area, \
                 earfcn, pci, unknown_11, unknown_12, altitude, vertical_acc \
          from unnest($1::integer[], $2::integer[], $3::integer[], $4::bigint[], \
                      $5::float8[], $6::float8[], $7::bigint[], $8::bigint[], \
@@ -256,7 +332,7 @@ pub(crate) async fn commit_cells(
                      $13::bigint[], $14::bigint[]) \
              as t(mcc, mnc, tac_id, cell_id, lat, lon, acc, area, earfcn, pci, \
                   unknown_11, unknown_12, altitude, vertical_acc) \
-         on conflict (mcc, mnc, tac_id, cell_id) do update set \
+         on conflict (mcc, mnc, tac_id, cell_id, radio) do update set \
              geom = case when cell.crawl_area is null then excluded.geom else cell.geom end, \
              acc = case when cell.crawl_area is null then excluded.acc else cell.acc end, \
              crawl_area = coalesce(cell.crawl_area, excluded.crawl_area), \
@@ -290,31 +366,36 @@ pub(crate) async fn commit_cells(
     .bind(&unknown_12s)
     .bind(&altitudes)
     .bind(&vertical_accs)
+    .bind(radio.as_str())
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query(
-        "insert into cell_site (mcc, mnc, site) \
-         select distinct mcc, mnc, cell_id >> 8 \
-         from unnest($1::integer[], $2::integer[], $3::bigint[]) as t(mcc, mnc, cell_id) \
-         on conflict do nothing",
-    )
-    .bind(&mccs)
-    .bind(&mncs)
-    .bind(&cell_ids)
-    .execute(&mut *tx)
-    .await?;
+    // known sites, for probing (LTE only: an LTE cell ID is site * 256 + sector)
+    if radio == Radio::Lte {
+        sqlx::query(
+            "insert into cell_site (mcc, mnc, site) \
+             select distinct mcc, mnc, cell_id >> 8 \
+             from unnest($1::integer[], $2::integer[], $3::bigint[]) as t(mcc, mnc, cell_id) \
+             on conflict do nothing",
+        )
+        .bind(&mccs)
+        .bind(&mncs)
+        .bind(&cell_ids)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     sqlx::query(
         "delete from cell_not_found n \
          using unnest($1::integer[], $2::integer[], $3::integer[], $4::bigint[]) \
              as t(mcc, mnc, tac_id, cell_id) \
-         where (n.mcc, n.mnc, n.tac_id, n.cell_id) = (t.mcc, t.mnc, t.tac_id, t.cell_id)",
+         where (n.mcc, n.mnc, n.tac_id, n.cell_id) = (t.mcc, t.mnc, t.tac_id, t.cell_id) and n.radio = $5",
     )
     .bind(&mccs)
     .bind(&mncs)
     .bind(&tacs)
     .bind(&cell_ids)
+    .bind(radio.as_str())
     .execute(&mut *tx)
     .await?;
 
@@ -326,14 +407,15 @@ pub(crate) async fn commit_cells(
         cell_ids.push(cell_id);
     }
     sqlx::query(
-        "insert into cell_not_found (mcc, mnc, tac_id, cell_id) \
-         select * from unnest($1::integer[], $2::integer[], $3::integer[], $4::bigint[]) \
-         on conflict (mcc, mnc, tac_id, cell_id) do update set checked_at = current_timestamp",
+        "insert into cell_not_found (mcc, mnc, tac_id, cell_id, radio) \
+         select *, $5 from unnest($1::integer[], $2::integer[], $3::integer[], $4::bigint[]) \
+         on conflict (mcc, mnc, tac_id, cell_id, radio) do update set checked_at = current_timestamp",
     )
     .bind(&mccs)
     .bind(&mncs)
     .bind(&tacs)
     .bind(&cell_ids)
+    .bind(radio.as_str())
     .execute(&mut *tx)
     .await?;
 
@@ -345,17 +427,18 @@ pub(crate) async fn commit_cells(
         is_crawled.push(crawled.contains(&key));
     }
     sqlx::query(
-        "insert into cell_crawl (mcc, mnc, area, last_crawled) \
-         select mcc, mnc, area, case when crawled then current_timestamp end \
+        "insert into cell_crawl (mcc, mnc, area, radio, last_crawled) \
+         select mcc, mnc, area, $5, case when crawled then current_timestamp end \
          from unnest($1::integer[], $2::integer[], $3::bigint[], $4::bool[]) \
              as t(mcc, mnc, area, crawled) \
-         on conflict (mcc, mnc, area) do update set last_crawled = excluded.last_crawled \
+         on conflict (mcc, mnc, area, radio) do update set last_crawled = excluded.last_crawled \
              where cell_crawl.last_crawled is null and excluded.last_crawled is not null",
     )
     .bind(&mccs)
     .bind(&mncs)
     .bind(&area_ids)
     .bind(&is_crawled)
+    .bind(radio.as_str())
     .execute(&mut *tx)
     .await?;
 
@@ -370,12 +453,13 @@ pub(crate) async fn commit_cells(
         "delete from cell_todo c \
          using unnest($1::integer[], $2::integer[], $3::integer[], $4::bigint[]) \
              as t(mcc, mnc, tac_id, cell_id) \
-         where (c.mcc, c.mnc, c.tac_id, c.cell_id) = (t.mcc, t.mnc, t.tac_id, t.cell_id)",
+         where (c.mcc, c.mnc, c.tac_id, c.cell_id) = (t.mcc, t.mnc, t.tac_id, t.cell_id) and c.radio = $5",
     )
     .bind(&mccs)
     .bind(&mncs)
     .bind(&tacs)
     .bind(&cell_ids)
+    .bind(radio.as_str())
     .execute(&mut *tx)
     .await?;
 
@@ -504,7 +588,7 @@ pub(crate) async fn probe_cells(client: &AppleWPSClient, pool: &PgPool) -> Resul
     for &(mcc, mnc, site, neighbours, siblings) in &sites {
         let cells: Vec<(i32, i64)> = sqlx::query_as(
             "select tac_id, cell_id from cell \
-             where mcc = $1 and mnc = $2 and cell_id between $3 and $4",
+             where mcc = $1 and mnc = $2 and cell_id between $3 and $4 and radio = 'lte'",
         )
         .bind(mcc)
         .bind(mnc)
@@ -529,7 +613,7 @@ pub(crate) async fn probe_cells(client: &AppleWPSClient, pool: &PgPool) -> Resul
          where (not t.sibling and exists (select 1 from cell_site s \
                        where (s.mcc, s.mnc, s.site) = (t.mcc, t.mnc, t.cell_id >> 8))) \
             or (t.sibling and exists (select 1 from cell c \
-                       where (c.mcc, c.mnc, c.cell_id) = (t.mcc, t.mnc, t.cell_id))) \
+                       where (c.mcc, c.mnc, c.cell_id) = (t.mcc, t.mnc, t.cell_id) and c.radio = 'lte')) \
             or exists (select 1 from cell_probe p \
                        where (p.mcc, p.mnc, p.tac_id, p.cell_id) = (t.mcc, t.mnc, t.tac_id, t.cell_id))",
     )
@@ -555,7 +639,7 @@ pub(crate) async fn probe_cells(client: &AppleWPSClient, pool: &PgPool) -> Resul
     let mut probed = Vec::new();
     let mut failed_sites = BTreeSet::new();
     let mut results = Vec::new();
-    for (key, resp) in query_cells(client, &keys).await {
+    for (key, resp) in query_cells(client, Radio::Lte, &keys).await {
         match resp {
             Ok(resp) => {
                 let hit = resp.iter().any(|(cell, loc)| cell_key(cell) == key && loc.is_some());
@@ -582,7 +666,7 @@ pub(crate) async fn probe_cells(client: &AppleWPSClient, pool: &PgPool) -> Resul
         probed.len()
     );
 
-    commit_cells(pool, &[], BTreeSet::new(), results).await?;
+    commit_cells(pool, Radio::Lte, &[], BTreeSet::new(), results).await?;
 
     let mut tx = pool.begin().await?;
     let probed_keys: Vec<CellKey> = probed.iter().map(|&(key, _)| key).collect();
@@ -629,7 +713,7 @@ pub(crate) async fn backfill_cell_areas(pool: &PgPool) -> Result<()> {
     loop {
         let rows: Vec<(i32, i32, i32, i64, f64, f64)> = sqlx::query_as(
             "select mcc, mnc, tac_id, cell_id, ST_Y(geom::geometry), ST_X(geom::geometry) \
-             from cell where crawl_area is null limit 10000",
+             from cell where crawl_area is null and radio = 'lte' limit 10000",
         )
         .fetch_all(pool)
         .await?;
@@ -652,7 +736,8 @@ pub(crate) async fn backfill_cell_areas(pool: &PgPool) -> Result<()> {
             "update cell c set crawl_area = t.area \
              from unnest($1::integer[], $2::integer[], $3::integer[], $4::bigint[], $5::bigint[]) \
                  as t(mcc, mnc, tac_id, cell_id, area) \
-             where (c.mcc, c.mnc, c.tac_id, c.cell_id) = (t.mcc, t.mnc, t.tac_id, t.cell_id)",
+             where (c.mcc, c.mnc, c.tac_id, c.cell_id) = (t.mcc, t.mnc, t.tac_id, t.cell_id) \
+                 and c.radio = 'lte'",
         )
         .bind(&mccs)
         .bind(&mncs)
@@ -682,8 +767,8 @@ mod tests {
     use super::*;
     use crate::protobuf;
 
-    fn tower(mnc: u32, tac_id: u32, cell_id: u32, earfcn: Option<u32>) -> CellTower {
-        CellTower { mcc: 284, mnc, tac_id, cell_id, location: None, uarfcn: earfcn, pid: None }
+    fn tower(mnc: u32, tac_id: u32, cell_id: u32, earfcn: Option<u32>) -> ReplyCell {
+        CellTower { mcc: 284, mnc, tac_id, cell_id, location: None, uarfcn: earfcn, pid: None }.into()
     }
 
     fn location(lat: f64) -> Option<Location> {
@@ -702,7 +787,7 @@ mod tests {
     #[test]
     fn merge_found_drops_area_estimates_and_merges_repeats() {
         let results = vec![
-            (tower(5, 106, SENTINEL_CELL_ID, None), location(42.6)),
+            (tower(5, 106, u32::MAX, None), location(42.6)),
             (tower(5, 106, 451645, None), location(42.7)),
             // the same cell in another reply, now with its EARFCN
             (tower(5, 106, 451645, Some(3350)), location(42.8)),
@@ -722,8 +807,24 @@ mod tests {
 
     #[test]
     fn cell_key_widens_without_sign_changes() {
-        let key = cell_key(&protobuf::CellTower { cell_id: u32::MAX - 1, ..tower(5, 106, 0, None) });
+        let key = cell_key(&tower(5, 106, u32::MAX - 1, None));
         assert_eq!(key, (284, 5, 106, i64::from(u32::MAX - 1)));
+        // a 36-bit 5G cell identity
+        let nr: ReplyCell = protobuf::NrCellTower { mcc: 232, mnc: 1, tac_id: 17008, cell_id: 17_248_763_906, ..Default::default() }.into();
+        assert_eq!(cell_key(&nr), (232, 1, 17008, 17_248_763_906));
+    }
+
+    #[test]
+    fn area_estimates_become_one_sentinel() {
+        // -1 is u32::MAX in LTE replies and u64::MAX in 5G ones
+        assert_eq!(tower(5, 106, u32::MAX, None).cell_id, SENTINEL_CELL_ID);
+        let nr: ReplyCell = protobuf::NrCellTower { cell_id: u64::MAX, ..Default::default() }.into();
+        assert_eq!(nr.cell_id, SENTINEL_CELL_ID);
+        let gsm: ReplyCell = protobuf::GsmCellTower { cell_id: 9935, lac: 1400, ..Default::default() }.into();
+        assert_eq!((gsm.tac_id, gsm.cell_id, gsm.channel), (1400, 9935, None));
+        for radio in [Radio::Lte, Radio::Nr, Radio::Gsm] {
+            assert_eq!(Radio::from_str(radio.as_str()), Some(radio));
+        }
     }
 
     #[test]

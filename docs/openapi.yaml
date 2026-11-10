@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: wtfps HTTP API
   version: 0.1.0
-  summary: Estimated coverage maps of LTE cells, from Apple's location service.
+  summary: Estimated coverage maps of LTE, 5G NR and 2G/3G (GSM, UMTS) cells, from Apple's location service.
   description: |
     Started with `wtfps serve` (default `--listen 0.0.0.0:8090`) or the `api` service in
     `docker-compose.yml` (port `WTFPS_API_PORT`, default 8090). No authentication.
@@ -36,18 +36,8 @@ paths:
         chosen propagation model). The GeoJSON uses the default settings: same-frequency
         competition, a 50 km radius (the 800 nearest cells), coverage as H3 hexagons.
       parameters:
-        - name: mcc
-          in: path
-          required: true
-          description: Mobile country code.
-          schema: {type: integer, format: int32, minimum: 0}
-          example: 284
-        - name: mnc
-          in: path
-          required: true
-          description: Mobile network code (as a number, so `01` is `1`).
-          schema: {type: integer, format: int32, minimum: 0}
-          example: 5
+        - $ref: '#/components/parameters/Mcc'
+        - $ref: '#/components/parameters/Mnc'
         - name: tac
           in: path
           required: true
@@ -60,91 +50,189 @@ paths:
           description: LTE cell ID (eNodeB ID × 256 + sector).
           schema: {type: integer, format: int64, minimum: 0}
           example: 451645
-        - name: format
-          in: query
-          required: false
-          description: Response format.
-          schema:
-            type: string
-            enum: [html, geojson]
-            default: html
-        - name: terrain
-          in: query
-          required: false
-          description: |
-            Experimental (case-insensitive): add diffraction loss from hills and ridges, from Copernicus GLO-30
-            elevation (see docs/propagation-models.md#terrain). Slower (a few seconds), and the
-            first map in a new area downloads elevation tiles. For HTML, the map gets a
-            "Terrain" checkbox, on by default.
-          schema:
-            type: string
-            enum: ['true', 'false', '1', '0']
-            default: 'false'
-        - name: propagation
-          in: query
-          required: false
-          description: |
-            Propagation model (case-insensitive). `hata`: Okumura–Hata / COST-231, lower
-            frequencies carry further and the default range is Hata's radius for the cell's band
-            and environment. `simple`: distance only, every frequency equal, range 4× the typical
-            cell spacing. For HTML it sets the map's initial selection, which can be switched on
-            the page.
-          schema:
-            type: string
-            enum: [hata, simple]
-            default: hata
+        - $ref: '#/components/parameters/Format'
+        - $ref: '#/components/parameters/Terrain'
+        - $ref: '#/components/parameters/Propagation'
       responses:
-        '200':
-          description: The map.
-          headers:
-            X-Wtfps-Source:
-              description: |
-                Where the cells came from: `database`; `fetched` (the cell wasn't crawled yet,
-                so it was fetched from Apple and saved); `online` (the database couldn't be
-                reached, so the map was built from Apple's replies and nothing was saved; the
-                HTML map's subtitle then says so, and the GeoJSON cell has `saved: false`).
-              schema:
-                type: string
-                enum: [database, fetched, online]
-          content:
-            text/html:
-              schema:
-                type: string
-                description: Self-contained HTML page (loads MapLibre, d3-contour and the OpenFreeMap basemap from the internet; the cell data is embedded).
-            application/geo+json:
-              schema:
-                $ref: '#/components/schemas/HeatmapGeoJSON'
-        '400':
-          description: An unknown `format`, `propagation` or `terrain`, or a path segment that isn't a number.
-          content:
-            text/plain:
-              schema: {type: string}
-              examples:
-                format:
-                  value: "unknown format \"pdf\": use html or geojson\n"
-                propagation:
-                  value: "unknown propagation \"cost231\": use hata or simple\n"
-                terrain:
-                  value: "unknown terrain \"yes\": use true or false\n"
-                path:
-                  value: "Invalid URL: Cannot parse value at index 1 with value `x` to a `i32`"
-        '404':
-          description: |
-            The cell isn't in the database and Apple has no location for it. It's recorded in
-            `cell_not_found`; any neighbours Apple returned are still saved. The cell is asked
-            about again on every request, so a cell Apple learns about later is found.
-          content:
-            text/plain:
-              schema: {type: string}
-              example: "Apple has no location for cell 262/1/100/1000001 (recorded in cell_not_found)\n"
-        '500':
-          description: |
-            Apple couldn't be reached or kept failing after retries, or a database query failed.
-            (Being unable to reach the database at all doesn't give 500; see `X-Wtfps-Source: online`.)
-          content:
-            text/plain:
-              schema: {type: string}
+        '200': {$ref: '#/components/responses/Map'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Error'}
+  /nr/{mcc}/{mnc}/{tac}/{cell}/heatmap:
+    get:
+      tags: [heatmap]
+      operationId: getNrHeatmap
+      summary: Coverage map of a 5G NR cell
+      description: |
+        The same as `/cells/…` for a 5G NR cell (stored with `radio = 'nr'`). A cell that isn't
+        crawled yet is fetched with its neighbouring cell numbers (±1, ±2; five requests) and
+        saved with every other 5G cell in the replies. The cell competes with nearby 5G cells;
+        the channel is an NR-ARFCN, whose frequency is used for Okumura–Hata (beyond its 2 GHz
+        design range for band n78). No antenna directions. The HTML map shows the NR-ARFCN with
+        its frequency, and clicking another cell opens its `/nr/…` map. In the GeoJSON, the cell
+        feature has `radio: nr` and `earfcn` holds the NR-ARFCN.
+      parameters:
+        - $ref: '#/components/parameters/Mcc'
+        - $ref: '#/components/parameters/Mnc'
+        - name: tac
+          in: path
+          required: true
+          description: 5G tracking area code (up to 24 bits). It must be correct; with a wrong TAC Apple reports the cell as not found.
+          schema: {type: integer, format: int32, minimum: 0}
+          example: 17008
+        - name: cell
+          in: path
+          required: true
+          description: 5G NR cell identity (NCI, up to 36 bits).
+          schema: {type: integer, format: int64, minimum: 0}
+          example: 17248763906
+        - $ref: '#/components/parameters/Format'
+        - $ref: '#/components/parameters/Terrain'
+        - $ref: '#/components/parameters/Propagation'
+      responses:
+        '200': {$ref: '#/components/responses/Map'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Error'}
+  /gsm/{mcc}/{mnc}/{lac}/{cell}/heatmap:
+    get:
+      tags: [heatmap]
+      operationId: getGsmHeatmap
+      summary: Coverage map of a 2G GSM or 3G UMTS cell
+      description: |
+        The same as `/cells/…` for a 2G GSM or 3G UMTS cell (stored with `radio = 'gsm'`). Apple's
+        replies for these cells contain only the asked cells, so a cell that isn't crawled yet is
+        fetched together with the blocks of cell IDs around it (three requests of 500 IDs) and
+        saved. The cell competes with nearby GSM/UMTS cells of its operator; their frequencies
+        aren't known, so the range is 4× the typical cell spacing, and there are no antenna
+        directions. The HTML map shows LAC instead of TAC, and clicking another cell opens its
+        `/gsm/…` map. In the GeoJSON, the cell feature has `radio: gsm`.
+      parameters:
+        - $ref: '#/components/parameters/Mcc'
+        - $ref: '#/components/parameters/Mnc'
+        - name: lac
+          in: path
+          required: true
+          description: Location area code. It must be correct; with a wrong LAC Apple reports the cell as not found.
+          schema: {type: integer, format: int32, minimum: 0}
+          example: 1400
+        - name: cell
+          in: path
+          required: true
+          description: GSM cell ID (CI, 16 bits), or for 3G the full 28-bit UMTS cell ID (RNC × 65536 + CID; the CID alone isn't found).
+          schema: {type: integer, format: int64, minimum: 0}
+          example: 9935
+        - $ref: '#/components/parameters/Format'
+        - $ref: '#/components/parameters/Terrain'
+        - $ref: '#/components/parameters/Propagation'
+      responses:
+        '200': {$ref: '#/components/responses/Map'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Error'}
 components:
+  parameters:
+    Mcc:
+      name: mcc
+      in: path
+      required: true
+      description: Mobile country code.
+      schema: {type: integer, format: int32, minimum: 0}
+      example: 284
+    Mnc:
+      name: mnc
+      in: path
+      required: true
+      description: Mobile network code (as a number, so `01` is `1`).
+      schema: {type: integer, format: int32, minimum: 0}
+      example: 5
+    Format:
+      name: format
+      in: query
+      required: false
+      description: Response format.
+      schema:
+        type: string
+        enum: [html, geojson]
+        default: html
+    Terrain:
+      name: terrain
+      in: query
+      required: false
+      description: |
+        Experimental (case-insensitive): add diffraction loss from hills and ridges, from Copernicus GLO-30
+        elevation (see docs/propagation-models.md#terrain). Slower (a few seconds), and the
+        first map in a new area downloads elevation tiles. For HTML, the map gets a
+        "Terrain" checkbox, on by default.
+      schema:
+        type: string
+        enum: ['true', 'false', '1', '0']
+        default: 'false'
+    Propagation:
+      name: propagation
+      in: query
+      required: false
+      description: |
+        Propagation model (case-insensitive). `hata`: Okumura–Hata / COST-231, lower
+        frequencies carry further and the default range is Hata's radius for the cell's band
+        and environment. `simple`: distance only, every frequency equal, range 4× the typical
+        cell spacing. For HTML it sets the map's initial selection, which can be switched on
+        the page.
+      schema:
+        type: string
+        enum: [hata, simple]
+        default: hata
+  responses:
+    Map:
+      description: The map.
+      headers:
+        X-Wtfps-Source:
+          description: |
+            Where the cells came from: `database`; `fetched` (the cell wasn't crawled yet,
+            so it was fetched from Apple and saved); `online` (the database couldn't be
+            reached, so the map was built from Apple's replies and nothing was saved; the
+            HTML map's subtitle then says so, and the GeoJSON cell has `saved: false`).
+          schema:
+            type: string
+            enum: [database, fetched, online]
+      content:
+        text/html:
+          schema:
+            type: string
+            description: Self-contained HTML page (loads MapLibre, d3-contour and the OpenFreeMap basemap from the internet; the cell data is embedded).
+        application/geo+json:
+          schema:
+            $ref: '#/components/schemas/HeatmapGeoJSON'
+    BadRequest:
+      description: An unknown `format`, `propagation` or `terrain`, or a path segment that isn't a number.
+      content:
+        text/plain:
+          schema: {type: string}
+          examples:
+            format:
+              value: "unknown format \"pdf\": use html or geojson\n"
+            propagation:
+              value: "unknown propagation \"cost231\": use hata or simple\n"
+            terrain:
+              value: "unknown terrain \"yes\": use true or false\n"
+            path:
+              value: "Invalid URL: Cannot parse value at index 1 with value `x` to a `i32`"
+    NotFound:
+      description: |
+        The cell isn't in the database and Apple has no location for it. It's recorded in
+        `cell_not_found`; any neighbours Apple returned are still saved. The cell is asked
+        about again on every request, so a cell Apple learns about later is found.
+      content:
+        text/plain:
+          schema: {type: string}
+          example: "Apple has no location for cell 262/1/100/1000001 (recorded in cell_not_found)\n"
+    Error:
+      description: |
+        Apple couldn't be reached or kept failing after retries, or a database query failed.
+        (Being unable to reach the database at all doesn't give 500; see `X-Wtfps-Source: online`.)
+      content:
+        text/plain:
+          schema: {type: string}
   schemas:
     HeatmapGeoJSON:
       type: object
@@ -230,9 +318,13 @@ components:
           allOf:
             - $ref: '#/components/schemas/CellBase'
             - type: object
-              required: [role, coverage, source, saved]
+              required: [role, coverage, source, saved, radio]
               properties:
                 role: {const: cell}
+                radio:
+                  type: string
+                  enum: [lte, nr, gsm]
+                  description: '`lte` on `/cells/…`; `nr` on `/nr/…`, where `earfcn` is the NR-ARFCN and `site`, `sector` and `azimuth_deg` mean nothing or are null; `gsm` (2G GSM / 3G UMTS) on `/gsm/…`, where `tac_id` is the LAC, `site` and `sector` follow the LTE formula but mean nothing, and `earfcn`, `pci` and `azimuth_deg` are null.'
                 coverage: {$ref: '#/components/schemas/CoverageSummary'}
                 source:
                   type: string

@@ -14,7 +14,7 @@ wtfps takes advantage of this feature and can be used to scrape estimated locati
 
 ## Usage
 
-Commands that use the database read `DATABASE_URL` from the environment or from a `.env` file in the current directory; see [Running with Docker Compose](#running-with-docker-compose) for the quickest setup.
+Commands that use the database read `DATABASE_URL` from the environment or from a `.env` file in the current directory; see [Running with Docker Compose](#running-with-docker-compose) for the quickest setup. [docs/examples.md](docs/examples.md) lists every command and URL with cells known to work, ready to copy. [docs/crawl.md](docs/crawl.md) is a step-by-step guide to crawling: finding seeds, how each crawl spreads, watching and steering it, and exporting the data.
 
 ### `query`
 
@@ -110,7 +110,30 @@ area est.       5   10143       -  -                 -    3000  https://www.open
 
 The reply looks like an LTE one: the cell, up to ~100 nearby 5G cells of all operators, and up to 20 tracking-area estimates, here with an accuracy of 3000 instead of 149000. The channel is an NR-ARFCN, shown with its frequency (`639936` is 3599 MHz, band n78; `152210` is 761 MHz, band n28). Apple hasn't sent a PCI for 5G cells so far. `--raw` works too; 5G cells are field `24` of the reply (LTE: `22`), requested in field `29` (LTE: `25`).
 
-Only the `cell` command handles 5G for now: the crawler, the database and heatmaps are LTE only (see [Limits](#limits-lte-only)).
+The crawler, heatmaps and the HTTP API handle 5G cells too: see [5G NR cells](#5g-nr-cells) below, `heatmap --nr` and `GET /nr/…`.
+
+#### 2G and 3G cells (GSM, UMTS)
+
+Add `--gsm` for a 2G GSM or 3G UMTS cell: the third number is then its location area code (LAC) and the fourth its cell ID. For 3G that's the full 28-bit cell ID, the radio network controller (RNC) × 65,536 plus the local cell ID (CID); the CID alone isn't found. For example RNC 23 and CID 56152 give 1563480:
+
+```
+$ wtfps cell --gsm 284 1 1400 9935
+cellid: 9935
+https://www.openstreetmap.org/search?query=42.670520780000004%2F23.29506683#map=16/42.670520780000004/23.29506683
+1 entries in reply
+cell_id       mnc     lac     f11  field 12        pci   acc_m  location
+9935            1    1400       -  -                 -    1969  https://www.openstreetmap.org/search?query=42.670520780000004%2F23.29506683#map=…
+
+$ wtfps cell --gsm 609 10 631 1563480
+...
+1563480        10     631       -  -                 -   10732  https://www.openstreetmap.org/search?query=16.63556671%2F-15.41049289#map=…
+```
+
+Unlike LTE and 5G, the reply holds only the asked cell: no nearby cells and no tracking-area estimates. GSM and UMTS cells share field `1` of the request and of the reply (`--raw` shows them as `1.…`). The cell's own fields 11 and 12 (columns `f11` and `field 12`) are undocumented; Apple sends `-1` for unknown cells and has left them out for known ones so far.
+
+The crawler, heatmaps and the HTTP API handle these cells too: see [GSM and UMTS cells](#gsm-and-umts-cells) below, `heatmap --gsm` and `GET /gsm/…`.
+
+Apple seems to have dropped 3G cells where operators have switched 3G off: none of several Bulgarian and Austrian 3G cells was found, while a 3G cell in Mauritania, where 3G still runs, was. Apple's replies also have a cell format of the same shape in request field `27` (reply `23`), still unidentified; 3G cells aren't found there.
 
 ### `explore cell`
 
@@ -153,6 +176,32 @@ from cell_site;
 select count(*), count(*) filter (where found) from cell_probe;
 ```
 
+#### 5G NR cells
+
+5G cells are crawled like LTE cells and stored in `cell` with `radio = 'nr'`; their `earfcn` column holds the 5G channel number (NR-ARFCN) and `cell_id` the 36-bit cell identity. Seed one with `radio = 'nr'`:
+
+```sql
+insert into cell_todo (mcc, mnc, tac_id, cell_id, radio) values (232, 1, 17008, 17248763906, 'nr');
+```
+
+Apple's 5G replies bring ~100 nearby 5G cells and tracking-area estimates like LTE ones, so the same area crawl applies, per radio: `cell_crawl` has a `radio` column, and an area crawled for LTE is still crawled for 5G. In Vienna, the seed above led to 101 5G cells in 16 areas. Probing (guessing site numbers and sectors) stays LTE only: how a 5G cell ID splits into site and sector differs per operator, so 5G discovery stays within the groups reached from seeds.
+
+#### GSM and UMTS cells
+
+The same crawler also collects 2G GSM and 3G UMTS cells, stored in `cell` with `radio = 'gsm'` (LTE cells have `'lte'`); for them `tac_id` holds the LAC. Seed one with `radio = 'gsm'`:
+
+```sql
+insert into cell_todo (mcc, mnc, tac_id, cell_id, radio) values (284, 1, 1400, 9935, 'gsm');
+```
+
+Apple's GSM replies contain only the asked cells, so the crawler can't follow them to nearby cells as it does for LTE. Instead it asks for whole blocks of 500 consecutive cell IDs, one request each, around every known GSM cell: the cell's own block and the two next to it, in its LAC. Scanned blocks are recorded in `cell_gsm_block` (with how many cells each held) and never asked again, and the scan spreads as cells turn up in new blocks. In LAC 1400 of A1 Bulgaria, the seed above led to 25 cells, all between 9000 and 9999, after 4 blocks. GSM rounds run between the LTE batches; `--no-probe` also turns off the block scan, leaving only seeds. Seeds Apple doesn't know go to `cell_not_found` with `radio = 'gsm'`; IDs in a scanned block that don't exist aren't recorded.
+
+```sql
+-- GSM / UMTS cells, blocks scanned and the cells they held
+select count(*) from cell where radio = 'gsm';
+select count(*), sum(found) from cell_gsm_block;
+```
+
 Besides position and accuracy (`acc`), each cell stores:
 
 | Column | Meaning |
@@ -188,6 +237,8 @@ The saved cells' areas are queued for the crawler, so a later `explore cell` con
 | `--no-fetch` | only use the database: fail instead of asking Apple for a cell that isn't crawled |
 | `--radius-km` | include the operator's cells within this distance (default 50; at most the 800 nearest, so towns use a few km and rural cells, which reach tens of km, still see their competitors) |
 | `--out` | output file (default `cell-<mcc>-<mnc>-<tac>-<cell>.html`, or `.geojson`) |
+| `--nr` | a 5G NR cell. It competes with nearby 5G cells; the channel is an NR-ARFCN, whose frequency feeds Okumura–Hata (3599 MHz for band n78, beyond Hata's 2 GHz design range, so rougher than for LTE). A cell that isn't crawled yet is fetched with its neighbouring cell numbers (±1, ±2). No antenna directions. Default file name `cell-nr-<mcc>-<mnc>-<tac>-<cell>.html` |
+| `--gsm` | a 2G GSM or 3G UMTS cell: the third number is its LAC, the fourth its cell ID (for 3G the full 28-bit ID). It competes with nearby GSM/UMTS cells only. A cell that isn't crawled yet is fetched together with the blocks of cell IDs around it (3 requests of 500 IDs), since Apple's GSM replies have no nearby cells. GSM frequencies aren't known, so the range is 4× the cell spacing, and there are no antenna directions (GSM cell IDs have no standard site/sector split). Default file name `cell-gsm-<mcc>-<mnc>-<lac>-<cell>.html` |
 
 Open the file in a browser. It shows the cell, its accuracy circle and the operator's nearby cells, with two views:
 
@@ -253,7 +304,7 @@ A cell gets no direction (`azimuth_deg` is null, and the map says "none for this
 | only one sector of its site is known | with one direction there's no centre to measure from. The most common case: Apple's replies often lack some of a site's sectors, and the crawler hasn't found them yet |
 | all known cells of the site share one PCI | e.g. the same sector on bands 3, 7 and 20: still one direction |
 | its sectors sit less than 30 m from the centre | Apple put them on nearly the same spot, so there's no offset to read a direction from |
-| it's a 3G cell | its ID isn't eNB × 256 + sector, so `cell_id >> 8` doesn't group real sites (see [Limits](#limits-lte-only)) |
+| it's a 3G cell | its ID isn't eNB × 256 + sector, so `cell_id >> 8` doesn't group real sites (see [Limits](#limits-radio-technologies)) |
 
 A cell that isn't in the database yet is fetched together with its neighbouring sector numbers (±1, ±2), which often fills in its site. A cell already in the database uses only what's stored; the crawler's probing of [missing sectors](#explore-cell) fills those gaps over time.
 
@@ -300,6 +351,8 @@ The OpenAPI 3.1 specification is in [docs/openapi.yaml](docs/openapi.yaml); open
 ```
 GET /cells/{mcc}/{mnc}/{tac}/{cell}/heatmap                  HTML map
 GET /cells/{mcc}/{mnc}/{tac}/{cell}/heatmap?format=geojson   GeoJSON
+GET /nr/{mcc}/{mnc}/{tac}/{cell}/heatmap                     the same for a 5G NR cell
+GET /gsm/{mcc}/{mnc}/{lac}/{cell}/heatmap                    the same for a 2G GSM / 3G UMTS cell
 ```
 
 The same lookup as `heatmap`: the cell is looked up in the database; if it isn't crawled yet, it's fetched from Apple with its site's sibling sectors (five requests, about a second) and saved together with every other cell in the replies, then the map is drawn. Later requests for the same cell are served from the database (tens of milliseconds). The HTML map has all the controls above; the GeoJSON uses the default model settings and a 50 km radius. Add `terrain=true` to include terrain (see [below](#terrain); slower, and the first map in a new area downloads elevation tiles). Add `propagation=simple` to use the simple propagation model instead of Okumura–Hata (`propagation=hata`, the default), for both formats; the HTML map then opens with that model selected, and keeps it when you click another cell. On an HTML map served by the API, clicking another cell opens that cell's map (the browser's Back button returns); on a map opened as a file, clicking does nothing.
@@ -312,6 +365,10 @@ The same lookup as `heatmap`: the cell is looked up in the database; if it isn't
 | `500` | Apple couldn't be reached or kept failing after retries, or a database query failed; the message has the error |
 
 A cell that got a `404` is asked about again on every request, so a cell Apple learns about later is found.
+
+`/nr/…` works the same way for 5G cells (see `heatmap --nr`): a cell that isn't crawled yet is fetched with its neighbouring cell numbers and saved, the map shows the NR-ARFCN with its frequency and no site or sector, and clicking another cell opens its `/nr/…` map; the GeoJSON's cell feature has `radio: "nr"`.
+
+`/gsm/…` works the same way for 2G GSM and 3G UMTS cells (see `heatmap --gsm`): the third number is the LAC, and for 3G the cell ID is the full 28-bit one. A cell that isn't crawled yet is fetched with the blocks of cell IDs around it (three requests) and saved; its map shows LAC instead of TAC and no site or sector, and clicking another cell opens its `/gsm/…` map. The GeoJSON's cell feature has `radio: "gsm"` (`"lte"` on `/cells/…`).
 
 #### Without a database
 
@@ -391,8 +448,6 @@ The external services wtfps calls can be changed in `.env` (compose passes them 
 | `WTFPS_APPLE_CHINA_URL` | `https://gs-loc-cn.apple.com/clls/wloc` | Apple's server for China (`--china`) |
 | `WTFPS_DEM_URL` | `https://copernicus-dem-30m.s3.amazonaws.com` | elevation tiles for terrain; a mirror needs the same `{name}/{name}.tif` layout |
 
-Connections to Apple are kept open and reused. When `WTFPS_APPLE_URL` (or `WTFPS_APPLE_CHINA_URL`) points anywhere else, such as a proxy, wtfps opens a new connection for every request and sends `Connection: close`, and says so when it starts (`using …: a new connection for every request`). Some proxies, Squid as a reverse proxy among them, stop answering requests sent over a reused connection: single `cell` lookups work, but `explore cell`, which sends hundreds of requests over a few connections, gets only `TimedOut`. To check a proxy, run `python3 scripts/proxy-keepalive-test.py` with `WTFPS_APPLE_URL` set: it sends a few lookups over one kept-open connection and a few over new ones.
-
 A value exported in the shell takes precedence over `.env`, for the command line and for `docker compose`.
 
 The image is built from the `Dockerfile` with the official `rust` and `debian` images only; Cargo's downloads and build output are kept in BuildKit cache mounts, so the first build takes about 2.5 minutes and later builds after a source change about 25 seconds. `docker builder prune` clears that cache (it has nothing to do with the database volume).
@@ -462,16 +517,31 @@ docker compose exec db psql -U postgres -d wtfps -c "select count(*) from cell"
 
 Keep `wtfps.dump` until you've checked the restored data.
 
-## Limits: LTE only
+## Limits: radio technologies
 
-The cell features assume LTE. Apple's LTE replies don't say which radio technology a cell uses, and the database has no column for it. 5G NR cells come through a separate request and reply that only the `cell` command uses so far ([`--nr`](#5g-cells)); storing them would need that column, because LTE and 5G cell IDs can overlap. Cells without an EARFCN or PCI, such as 3G cells imported from elsewhere, would work only partly:
+| Radio | `cell` | Crawler, database, heatmaps, API |
+|---|---|---|
+| LTE | yes | yes: everything described above |
+| 2G GSM, 3G UMTS | `--gsm` | yes (`radio = 'gsm'`, `heatmap --gsm`, `GET /gsm/…`), with the limits below |
+| 5G NR | `--nr` | yes (`radio = 'nr'`, `heatmap --nr`, `GET /nr/…`), with the limits below |
 
-- **Lookup** works: cells in the database are served from it. A missing cell is asked of Apple, which doesn't seem to know 3G cells, so the answer is `404`.
-- **Frequency filter**: with no EARFCN it's off, so the cell competes with every cell of its operator, all channels mixed; with several carriers that makes its area too small. Band names are empty.
-- **Antenna directions and crawler probing** are wrong for 3G: both take the site as `cell_id / 256`, the LTE numbering. A 3G cell ID is the radio network controller × 65,536 plus a local cell ID whose sector numbering is up to the operator.
-- **Channel numbers overlap between technologies.** Bands are named from the LTE table, but some 3G channel numbers fall in the same ranges: 2950, reported for MNC 1 cells in Bulgaria, is LTE band 7 (2600 MHz) or 3G band 8 (900 MHz). A cell labelled "band 7" with a number between 2937 and 3088 may be 3G.
+The `radio` column (`lte`, `nr`, `gsm`) keeps the technologies apart: they number their areas (TAC, LAC) and cells independently, so the same numbers can mean different cells.
 
-Positions, accuracy, the coverage model and contours work the same for any cell.
+5G cells work like LTE cells except:
+
+- **Probing**: none, so the crawl doesn't leave the groups of ~100 cells reached from seeds; guessing needs each operator's split of the 36-bit cell ID into site (22–32 bits) and cell.
+- **Antenna directions**: none, for the same reason.
+- **Okumura–Hata** is applied to 5G frequencies (3.5 GHz for band n78) far beyond its 2 GHz design range, so the range and frequency terms are rougher than for LTE.
+- **PCI**: Apple hasn't sent one for 5G cells so far.
+
+GSM and UMTS cells work with less than LTE cells:
+
+- **Discovery**: Apple's GSM replies have no nearby cells, so the crawler scans blocks of cell IDs around known cells instead of following replies, and finds only what lies near the IDs it already knows. New LACs come only from seeds.
+- **Frequency**: Apple's GSM replies have no channel (fields 11 and 12 may be one, but are unconfirmed), so a GSM map competes with every GSM/UMTS cell of the operator, all bands mixed, and its range is 4× the cell spacing rather than Okumura–Hata's.
+- **Antenna directions**: none; GSM and UMTS cell IDs have no standard site/sector split.
+- **3G**: Apple seems to drop 3G cells where 3G is switched off, so in such countries only GSM cells are found.
+
+LTE channel numbers can overlap with 3G ones: some 3G channel numbers fall in LTE ranges (2950, reported for MNC 1 cells in Bulgaria, is LTE band 7 or 3G band 8), so an LTE cell labelled "band 7" with a number between 2937 and 3088 may in fact be 3G.
 
 ## Development
 

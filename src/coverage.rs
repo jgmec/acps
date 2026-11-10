@@ -36,8 +36,11 @@ pub struct ModelCell {
     pub reach: Option<i64>,
     /// estimated antenna direction, degrees clockwise from north, used with `directional`
     pub azimuth_deg: Option<f64>,
-    /// LTE channel; gives the cell's frequency for the Okumura-Hata terms
+    /// channel (LTE EARFCN or 5G NR-ARFCN); cells on the same channel define the environment
     pub earfcn: Option<i32>,
+    /// downlink frequency in MHz, from the channel (see `downlink_mhz`, `nr_arfcn_mhz`), for
+    /// the Okumura-Hata terms; None when unknown
+    pub mhz: Option<f64>,
     /// diffraction loss from terrain, in the target's local frame, if computed for it
     pub terrain: Option<Arc<TerrainLoss>>,
 }
@@ -200,11 +203,11 @@ impl Model {
         let spacing = typical_spacing(if same_channel.len() >= 2 { &same_channel } else { &model.xy });
         let environment = Environment::from_spacing(spacing);
         // the simple model ignores frequency: no frequency loss, range from cell spacing
-        let target_mhz = target.earfcn.and_then(downlink_mhz).filter(|_| params.propagation == Propagation::Hata);
+        let target_mhz = target.mhz.filter(|_| params.propagation == Propagation::Hata);
         let loss = |mhz: f64| hata_loss_1km_db(mhz) + environment.correction_db(mhz);
         model.frequency_loss = cells
             .iter()
-            .map(|c| match (target_mhz, c.earfcn.and_then(downlink_mhz)) {
+            .map(|c| match (target_mhz, c.mhz) {
                 (Some(target), Some(cell)) => loss(cell) - loss(target),
                 _ => 0.0,
             })
@@ -557,6 +560,7 @@ mod tests {
             reach: None,
             azimuth_deg: None,
             earfcn,
+            mhz: earfcn.and_then(downlink_mhz),
             terrain: None,
         }
     }
@@ -884,6 +888,20 @@ mod tests {
         expect(format!("c.acc > 0 ? c.acc : {};", DEFAULT_ACC_M));
         expect(format!("const M_LAT = {};", METRES_PER_DEGREE));
         expect(format!("(theta * 180 / Math.PI / {}) ** 2, {})", BEAMWIDTH_DEG, FRONT_TO_BACK_DB));
+        // the 5G channel raster, checked at its three steps against nr_arfcn_mhz
+        for (line, n) in [
+            ("if (n < 600000) return 0.005 * n;", 152_210),
+            ("if (n < 2016667) return 3000 + 0.015 * (n - 600000);", 639_936),
+            ("if (n <= 3279165) return 24250.08 + 0.06 * (n - 2016667);", 2_100_000),
+        ] {
+            expect(line.to_string());
+            let js = match n {
+                0..=599_999 => 0.005 * f64::from(n),
+                600_000..=2_016_666 => 3000.0 + 0.015 * (f64::from(n) - 600_000.0),
+                _ => 24_250.08 + 0.06 * (f64::from(n) - 2_016_667.0),
+            };
+            assert!((nr_arfcn_mhz(n).unwrap() - js).abs() < 1e-9, "{n}");
+        }
 
         let start = html.find("const BANDS = [").expect("BANDS table") + "const BANDS = ".len();
         let end = start + html[start..].find("]];").unwrap() + 2;

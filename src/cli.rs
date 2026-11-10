@@ -34,8 +34,12 @@ pub(crate) enum Command {
         #[arg(long)]
         raw: bool,
         /// a 5G NR cell: uses Apple's 5G cell request, which keeps the full 36-bit cell ID
-        #[arg(long)]
+        #[arg(long, conflicts_with = "gsm")]
         nr: bool,
+        /// a 2G GSM or 3G UMTS cell: the third number is its LAC, the fourth its cell ID (for
+        /// 3G the full 28-bit ID, RNC x 65536 + CID). Apple returns only the asked cell
+        #[arg(long)]
+        gsm: bool,
     },
     Oui {
         oui: String,
@@ -66,6 +70,13 @@ pub(crate) enum Command {
         /// only use the database: don't ask Apple for a cell that isn't crawled yet
         #[arg(long)]
         no_fetch: bool,
+        /// a 2G GSM or 3G UMTS cell: the third number is its LAC, the fourth its cell ID (for
+        /// 3G the full 28-bit ID). Competes with nearby GSM/UMTS cells; no antenna directions
+        #[arg(long, conflicts_with = "nr")]
+        gsm: bool,
+        /// a 5G NR cell (36-bit cell ID). Competes with nearby 5G cells; no antenna directions
+        #[arg(long)]
+        nr: bool,
     },
     /// Apply pending database migrations and exit
     Migrate,

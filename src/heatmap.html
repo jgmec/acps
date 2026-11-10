@@ -190,7 +190,7 @@ th { color: var(--text-secondary); font-weight: 500; }
   <details>
     <summary>Table: this cell and the nearest cells of the same operator</summary>
     <table>
-      <thead><tr><th>Cell ID</th><th>TAC</th><th>Site</th><th>Sector</th><th>EARFCN</th><th>Band</th><th>PCI</th><th>Distance (m)</th><th>Accuracy (m)</th><th>Latitude</th><th>Longitude</th><th>Crawled (UTC)</th></tr></thead>
+      <thead><tr><th>Cell ID</th><th id="area-head">TAC</th><th>Site</th><th>Sector</th><th id="channel-head">EARFCN</th><th>Band</th><th>PCI</th><th>Distance (m)</th><th>Accuracy (m)</th><th>Latitude</th><th>Longitude</th><th>Crawled (UTC)</th></tr></thead>
       <tbody id="table-body"></tbody>
     </table>
   </details>
@@ -245,6 +245,13 @@ const isDark = () => {
 };
 const css = (name) => getComputedStyle(document.querySelector(".viz-root")).getPropertyValue(name).trim();
 const $ = (id) => document.getElementById(id);
+
+// the cell's radio: "lte"; "nr" (5G: the channel is an NR-ARFCN, cell IDs have no LTE
+// site/sector split); "gsm" (2G/3G: the area code is a LAC, no channel, no site/sector split)
+const RADIO = DATA.radio || "lte";
+const GSM = RADIO === "gsm", NR = RADIO === "nr";
+const AREA = GSM ? "LAC" : "TAC";
+const CHANNEL = NR ? "NR-ARFCN" : "EARFCN";
 
 // local metric coordinates around the target cell
 const t = DATA.target;
@@ -320,7 +327,21 @@ function hataRadiusM(mhz, environment) {
   const slope = 44.9 - 6.55 * Math.log10(HATA_MAST_M);
   return 1000 * 10 ** ((HATA_MAX_PATH_LOSS_DB - hataLoss1kmDb(mhz, environment)) / slope);
 }
+// 5G NR-ARFCN to MHz (3GPP TS 38.104 global raster), as nr_arfcn_mhz in src/coverage.rs
+function nrMhz(n) {
+  if (n == null || n < 0) return NaN;
+  if (n < 600000) return 0.005 * n;
+  if (n < 2016667) return 3000 + 0.015 * (n - 600000);
+  if (n <= 3279165) return 24250.08 + 0.06 * (n - 2016667);
+  return NaN;
+}
+// downlink frequency of this map's channel numbers (EARFCN, or NR-ARFCN on 5G maps)
+const channelMhz = (ch) => NR ? nrMhz(ch) : downlinkMhz(ch);
 function band(earfcn) {
+  if (NR) {
+    const mhz = nrMhz(earfcn);
+    return Number.isNaN(mhz) ? "" : `${Math.round(mhz)} MHz`;
+  }
   const b = BANDS.find(([lo, hi]) => earfcn >= lo && earfcn <= hi);
   return b ? `band ${b[2]}, ${b[3]} MHz` : "";
 }
@@ -343,7 +364,7 @@ if (!(t.unknown_12 > 0)) {
   $("use-reach-label").textContent = "Field 12 not crawled yet for this cell";
 }
 $("same-freq-label").textContent = freqKnown
-  ? `Only cells on this cell's frequency (EARFCN ${t.earfcn})`
+  ? `Only cells on this cell's frequency (${CHANNEL} ${t.earfcn})`
   : "Frequency of this cell unknown: comparing with all cells";
 
 // indices of the cells this cell competes with (always includes the cell itself at 0)
@@ -379,9 +400,9 @@ function resetRange() {
   const spacing = typicalSpacing();
   const environment = environmentOf(spacing);
   // the simple model ignores frequency: no frequency loss, range from cell spacing
-  const targetMhz = $("propagation").value === "simple" ? NaN : downlinkMhz(t.earfcn);
+  const targetMhz = $("propagation").value === "simple" ? NaN : channelMhz(t.earfcn);
   cells.forEach((c, i) => {
-    const mhz = downlinkMhz(c.earfcn);
+    const mhz = channelMhz(c.earfcn);
     frequencyLoss[i] = Number.isNaN(targetMhz) || Number.isNaN(mhz)
       ? 0 : hataLoss1kmDb(mhz, environment) - hataLoss1kmDb(targetMhz, environment);
   });
@@ -677,13 +698,18 @@ for (const el of document.querySelectorAll(".controls input")) {
   });
 }
 
-const site = (id) => Math.floor(id / 256);
-const sector = (id) => id % 256;
-function cellLabel(c) { return `cell ${c.cell_id} · TAC ${c.tac_id} · site ${site(c.cell_id)} / sector ${sector(c.cell_id)}`; }
+// only LTE cell IDs split into site × 256 + sector
+const SITES = RADIO === "lte";
+const site = (id) => SITES ? Math.floor(id / 256) : "-";
+const sector = (id) => SITES ? id % 256 : "-";
+function cellLabel(c) {
+  return `cell ${c.cell_id} · ${AREA} ${c.tac_id}` + (SITES ? ` · site ${site(c.cell_id)} / sector ${sector(c.cell_id)}` : "");
+}
 function radioLabel(c) {
+  if (GSM) return "2G/3G (GSM/UMTS), frequency unknown";
   if (c.earfcn == null) return "frequency unknown";
   const b = band(c.earfcn);
-  return `EARFCN ${c.earfcn}${b ? " (" + b + ")" : ""} · PCI ${c.pci ?? "unknown"}`;
+  return `${NR ? "5G · " : ""}${CHANNEL} ${c.earfcn}${b ? " (" + b + ")" : ""} · PCI ${c.pci ?? "unknown"}`;
 }
 
 const tooltip = $("tooltip");
@@ -706,10 +732,10 @@ function showTooltip(point, lines) {
 
 // Pages from the HTTP API can open another cell's map by clicking it; a page written by
 // `wtfps heatmap` and opened as a file has no server to ask. Any path prefix in front of
-// /cells/ (e.g. from a reverse proxy) is kept.
-const API_PATH = /^(.*)\/cells\/\d+\/\d+\/\d+\/\d+\/heatmap\/?$/.exec(location.pathname);
+// /cells/, /nr/ or /gsm/ (e.g. from a reverse proxy) is kept.
+const API_PATH = /^(.*)\/(?:cells|nr|gsm)\/\d+\/\d+\/\d+\/\d+\/heatmap\/?$/.exec(location.pathname);
 const fromApi = /^https?:$/.test(location.protocol) && API_PATH !== null;
-const cellUrl = (c) => `${API_PATH[1]}/cells/${c.mcc}/${c.mnc}/${c.tac_id}/${c.cell_id}/heatmap` +
+const cellUrl = (c) => `${API_PATH[1]}/${GSM ? "gsm" : NR ? "nr" : "cells"}/${c.mcc}/${c.mnc}/${c.tac_id}/${c.cell_id}/heatmap` +
   ($("propagation").value === "simple" ? "?propagation=simple" : "");
 
 // cells within 12 px of the pointer (a 24 px target around each dot)
@@ -764,7 +790,10 @@ map.on("mousemove", (e) => {
 map.getContainer().addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
 
 $("title").textContent = `Estimated coverage of cell ${t.cell_id}`;
-$("subtitle").textContent = `MCC ${t.mcc} · MNC ${t.mnc} · TAC ${t.tac_id} · site ${site(t.cell_id)}, sector ${sector(t.cell_id)} · ` +
+$("area-head").textContent = AREA;
+$("channel-head").textContent = CHANNEL;
+$("subtitle").textContent = `MCC ${t.mcc} · MNC ${t.mnc} · ${AREA} ${t.tac_id} · ` +
+  (SITES ? `site ${site(t.cell_id)}, sector ${sector(t.cell_id)} · ` : "") +
   `${radioLabel(t)} · ` +
   `${t.lat.toFixed(5)}, ${t.lon.toFixed(5)} · data from ${DATA.generated}` +
   // set when the cells came from Apple without being saved (database unavailable)
